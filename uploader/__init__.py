@@ -1,0 +1,1 @@
+# This package no longer manages a legacy cookies directory.

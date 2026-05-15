@@ -1,0 +1,1 @@
+# Legacy cookies subdirectory creation removed.

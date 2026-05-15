@@ -1,0 +1,18 @@
+非丨自媒体一键分发
+
+This project is licensed under the Apache License, Version 2.0.
+
+This project is derived from and inspired by open-source work including:
+
+- zydgmail/social-auto-upload
+  https://github.com/zydgmail/social-auto-upload
+  Used as the MVP base for the local one-click package and multi-platform publishing workflow.
+
+- funfan0517/MediaPublishPlatform
+  https://github.com/funfan0517/MediaPublishPlatform
+  Referenced for platform capability modeling, account state management, publishing task abstraction, task records, and failure recovery design.
+
+This project adds local one-click startup, a redesigned publish center, pre-publish dry-run workflow, platform-specific cover handling, topic generation improvements, schedule write-back checks, and current-page publishing flow adaptations for several Chinese creator platforms.
+
+No platform trademarks are owned by this project. Platform names are used only to describe compatibility targets.
+
