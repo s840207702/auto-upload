@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -7,16 +8,16 @@ import time
 import uuid
 from pathlib import Path
 from conf import DEBUG_SKIP_FINAL_PUBLISH
-from queue import Queue
+from queue import Empty, Queue
 from urllib.parse import urlparse
 from flask_cors import CORS
 from myUtils.auth import check_cookie
-from flask import Flask, request, jsonify, Response, send_from_directory
+from flask import Flask, cli as flask_cli, request, jsonify, Response, send_from_directory
 from conf import BASE_DIR
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen, bilibili_cookie_gen
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
 from myUtils.postVideo import post_video_bilibili
-from myUtils.postVideo import post_video_batch_dry_run_tabs
+from myUtils.postVideo import post_video_batch_dry_run_tabs, post_video_batch_tabs
 from utils.base_social_media import (
     launch_chromium_with_codecs,
     new_publish_context,
@@ -29,9 +30,35 @@ from utils.publish_limits import get_publish_tag_limit, normalize_publish_tags
 
 
 active_queues = {}
+active_login_sessions = {}
+cancelled_login_request_ids = set()
 _open_browsers = []  # keep references to prevent GC/auto-close
 PUBLISH_PLATFORM_ORDER = [3, 2, 5, 1, 4]  # 抖音、视频号、B站、小红书、快手
 PUBLISH_PLATFORM_ORDER_INDEX = {platform_type: index for index, platform_type in enumerate(PUBLISH_PLATFORM_ORDER)}
+PLATFORM_NAME_MAP = {
+    1: "小红书",
+    2: "视频号",
+    3: "抖音",
+    4: "快手",
+    5: "B站",
+}
+
+
+class _WerkzeugStartupWarningFilter(logging.Filter):
+    _hidden_fragments = (
+        "This is a development server",
+        "Do not use it in a production deployment",
+        "Use a production WSGI server instead",
+    )
+
+    def filter(self, record):
+        message = record.getMessage()
+        return not any(fragment in message for fragment in self._hidden_fragments)
+
+
+def _quiet_local_server_startup_noise():
+    flask_cli.show_server_banner = lambda *args, **kwargs: None
+    logging.getLogger("werkzeug").addFilter(_WerkzeugStartupWarningFilter())
 
 
 def _publish_platform_sort_key(item):
@@ -42,6 +69,14 @@ def _publish_platform_sort_key(item):
     except (TypeError, ValueError):
         return 999
     return PUBLISH_PLATFORM_ORDER_INDEX.get(platform_type, 999)
+
+def _run_async(coro):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 # 全局账号验证缓存时间（秒），默认 3600 秒（1 小时）
 ACCOUNT_STATUS_TTL_SECONDS = int(os.getenv('ACCOUNT_STATUS_TTL_SECONDS', '3600'))
@@ -113,6 +148,13 @@ CORS(app)
 # 限制上传文件大小为160MB
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 
+def _serve_frontend_index():
+    response = app.send_static_file('index.html')
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
+
 def _safe_storage_path(base_dir, stored_name):
     if not stored_name:
         return None
@@ -133,6 +175,42 @@ def _account_row_to_dict(row):
     data = dict(zip(keys, row))
     data["avatarUrl"] = f"/avatars/{data['avatarPath']}" if data.get("avatarPath") else None
     return data
+
+def _update_account_identity(account_id: int, avatar_path=None, display_name=None):
+    if not avatar_path and not display_name:
+        return
+    with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        cursor = conn.cursor()
+        if avatar_path and display_name:
+            cursor.execute(
+                """
+                UPDATE user_info
+                SET avatarPath = ?, userName = ?, avatarUpdatedAt = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (avatar_path, display_name, account_id)
+            )
+        elif avatar_path:
+            cursor.execute(
+                "UPDATE user_info SET avatarPath = ?, avatarUpdatedAt = CURRENT_TIMESTAMP WHERE id = ?",
+                (avatar_path, account_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE user_info SET userName = ?, avatarUpdatedAt = CURRENT_TIMESTAMP WHERE id = ?",
+                (display_name, account_id)
+            )
+        conn.commit()
+
+async def _capture_identity_from_logged_in_page(page, account_id: int, account_type: int):
+    try:
+        avatar_name = f"account_{account_id}.png"
+        avatar_path, display_name = await capture_identity_from_page(page, avatar_name, account_type)
+        _update_account_identity(account_id, avatar_path, display_name)
+        return avatar_path, display_name
+    except Exception as e:
+        print(f"capture account identity failed id={account_id} type={account_type} err={e}")
+        return None, None
 
 async def _capture_account_avatar(account_id: int):
     url_map = {
@@ -174,33 +252,10 @@ async def _capture_account_avatar(account_id: int):
         except Exception:
             pass
         await page.wait_for_timeout(1200)
-        avatar_name = f"account_{account_id}.png"
-        avatar_path, display_name = await capture_identity_from_page(page, avatar_name, row["type"])
+        avatar_path, display_name = await _capture_identity_from_logged_in_page(page, account_id, row["type"])
         await context.close()
         if not avatar_path and not display_name:
             return None, "未在平台后台页面识别到头像或昵称"
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
-            cursor = conn.cursor()
-            if avatar_path and display_name:
-                cursor.execute(
-                    """
-                    UPDATE user_info
-                    SET avatarPath = ?, userName = ?, avatarUpdatedAt = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (avatar_path, display_name, account_id)
-                )
-            elif avatar_path:
-                cursor.execute(
-                    "UPDATE user_info SET avatarPath = ?, avatarUpdatedAt = CURRENT_TIMESTAMP WHERE id = ?",
-                    (avatar_path, account_id)
-                )
-            else:
-                cursor.execute(
-                    "UPDATE user_info SET userName = ?, avatarUpdatedAt = CURRENT_TIMESTAMP WHERE id = ?",
-                    (display_name, account_id)
-                )
-            conn.commit()
         return avatar_path, None
     except Exception as e:
         return None, str(e)
@@ -268,9 +323,98 @@ def _validate_publish_payload(data):
 
     return errors
 
+async def _check_publish_account_states(data_list):
+    account_items = []
+    seen_keys = set()
+
+    for data in data_list:
+        if not isinstance(data, dict):
+            continue
+        if data.get("skipAccountCheck") in (1, "1", True, "true", "True", "yes"):
+            continue
+        try:
+            platform_type = int(data.get("type"))
+        except (TypeError, ValueError):
+            continue
+        for account_file in data.get("accountList") or []:
+            key = (platform_type, account_file)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            account_items.append({
+                "type": platform_type,
+                "filePath": account_file,
+            })
+
+    if not account_items:
+        return []
+
+    with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        placeholders = ",".join(["?"] * len(account_items))
+        file_paths = [item["filePath"] for item in account_items]
+        cursor.execute(
+            f"""
+            SELECT id, type, filePath, userName, status, profileName, avatarPath, avatarUpdatedAt
+            FROM user_info
+            WHERE filePath IN ({placeholders})
+            """,
+            file_paths,
+        )
+        rows_by_file = {row["filePath"]: row for row in cursor.fetchall()}
+
+    failures = []
+    status_updates = []
+
+    for item in account_items:
+        platform_type = item["type"]
+        file_path = item["filePath"]
+        row = rows_by_file.get(file_path)
+        display_name = row["userName"] if row else file_path
+        profile_name = row["profileName"] if row else None
+        label_name = display_name or profile_name or file_path
+        platform_name = PLATFORM_NAME_MAP.get(platform_type, "未知平台")
+
+        cookie_path = Path(BASE_DIR / "cookiesFile" / file_path)
+        if not cookie_path.exists():
+            failures.append(f"{platform_name}「{label_name}」登录文件不存在，请重新登录")
+            if row:
+                status_updates.append((0, row["id"]))
+            continue
+
+        try:
+            is_valid = await check_cookie(platform_type, file_path)
+        except Exception as e:
+            print(f"publish account preflight failed type={platform_type} file={file_path} err={e}")
+            is_valid = False
+
+        if row:
+            status_updates.append((1 if is_valid else 0, row["id"]))
+
+        if not is_valid:
+            failures.append(f"{platform_name}「{label_name}」登录已失效，请先重登后再发布")
+
+    if status_updates:
+        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                "UPDATE user_info SET status = ? WHERE id = ?",
+                status_updates,
+            )
+            conn.commit()
+
+    return failures
+
+def _validate_publish_accounts_before_run(data_list):
+    failures = _run_async(_check_publish_account_states(data_list))
+    if not failures:
+        return []
+    return ["发布前账号检查未通过"] + failures
+
 @app.route('/')
 def hello_world():
-    return app.send_static_file('index.html')
+    return _serve_frontend_index()
 
 # SPA fallback: serve files if exist, else index.html
 @app.route('/<path:path>')
@@ -278,7 +422,7 @@ def spa_fallback(path):
     target = FRONTEND_DIST / path
     if target.exists() and target.is_file():
         return send_from_directory(str(FRONTEND_DIST), path)
-    return app.send_static_file('index.html')
+    return _serve_frontend_index()
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -698,12 +842,10 @@ def refresh_account_avatar():
             "data": None
         }), 200
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        avatar_path, error = loop.run_until_complete(_capture_account_avatar(int(account_id)))
-    finally:
-        loop.close()
+        avatar_path, error = _run_async(_capture_account_avatar(int(account_id)))
+    except Exception as e:
+        avatar_path, error = None, str(e)
 
     if error:
         return jsonify({
@@ -729,26 +871,72 @@ def login():
     type = request.args.get('type')
     # 账号名
     id = request.args.get('id')
+    request_id = request.args.get('request_id') or str(uuid.uuid4())
+    if request_id in cancelled_login_request_ids:
+        cancelled_login_request_ids.discard(request_id)
+        status_queue = Queue()
+        status_queue.put("CANCELLED")
+        response = Response(sse_stream(status_queue), mimetype='text/event-stream')
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['X-Accel-Buffering'] = 'no'
+        response.headers['Content-Type'] = 'text/event-stream'
+        response.headers['Connection'] = 'keep-alive'
+        return response
     # 是否更新已有记录
     update_mode = request.args.get('update', '0') in ('1', 'true', 'True')
     record_id = request.args.get('record_id')
 
     # 模拟一个用于异步通信的队列
     status_queue = Queue()
+    cancel_event = threading.Event()
     active_queues[id] = status_queue
-
-    def on_close():
-        print(f"清理队列: {id}")
-        del active_queues[id]
+    active_login_sessions[request_id] = {
+        "queue": status_queue,
+        "cancel_event": cancel_event,
+        "account_name": id,
+    }
     # 启动异步任务线程
-    thread = threading.Thread(target=run_async_function, args=(type,id,status_queue, update_mode, record_id), daemon=True)
+    thread = threading.Thread(
+        target=run_async_function,
+        args=(type, id, status_queue, update_mode, record_id, cancel_event),
+        daemon=True
+    )
     thread.start()
-    response = Response(sse_stream(status_queue,), mimetype='text/event-stream')
+    response = Response(sse_stream(status_queue, session_key=request_id), mimetype='text/event-stream')
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['X-Accel-Buffering'] = 'no'  # 关键：禁用 Nginx 缓冲
     response.headers['Content-Type'] = 'text/event-stream'
     response.headers['Connection'] = 'keep-alive'
     return response
+
+
+@app.route('/cancelLogin', methods=['POST'])
+def cancel_login():
+    data = request.get_json() or {}
+    request_id = data.get('requestId') or data.get('request_id')
+    if not request_id:
+        return jsonify({
+            "code": 400,
+            "msg": "requestId required",
+            "data": None
+        }), 200
+
+    session = active_login_sessions.get(request_id)
+    if not session:
+        cancelled_login_request_ids.add(request_id)
+        return jsonify({
+            "code": 200,
+            "msg": None,
+            "data": {"cancelled": True}
+        }), 200
+
+    session["cancel_event"].set()
+    session["queue"].put("CANCELLED")
+    return jsonify({
+        "code": 200,
+        "msg": None,
+        "data": {"cancelled": True}
+    }), 200
 
 @app.route('/postVideo', methods=['POST'])
 def postVideo():
@@ -761,6 +949,16 @@ def postVideo():
             "code": 400,
             "msg": "；".join(validation_errors),
             "data": None
+        }), 200
+
+    account_errors = _validate_publish_accounts_before_run([data])
+    if account_errors:
+        return jsonify({
+            "code": 409,
+            "msg": "；".join(account_errors),
+            "data": {
+                "reason": "account_preflight_failed"
+            }
         }), 200
 
     # 从JSON数据中提取fileList和accountList
@@ -973,6 +1171,7 @@ def open_accounts():
                         return False
                     await write_context_state(context, storage_path, account_type)
                     mark_account_normal(account_id)
+                    await _capture_identity_from_logged_in_page(page, account_id, account_type)
                     if close_after_login and closed_state is not None and not closed_state["closed"]:
                         closed_state["closed"] = True
                         await page.close()
@@ -1196,6 +1395,16 @@ def postVideoBatch():
                 "data": None
             }), 200
 
+    account_errors = _validate_publish_accounts_before_run(data_list)
+    if account_errors:
+        return jsonify({
+            "code": 409,
+            "msg": "；".join(account_errors),
+            "data": {
+                "reason": "account_preflight_failed"
+            }
+        }), 200
+
     all_debug_dry_run = all(
         DEBUG_SKIP_FINAL_PUBLISH if 'debugDryRun' not in data else bool(data.get('debugDryRun'))
         for data in data_list
@@ -1218,119 +1427,77 @@ def postVideoBatch():
             }
         }), 200
 
-    for data in data_list:
-        # 从JSON数据中提取fileList和accountList
-        file_list = data.get('fileList', [])
-        account_list = data.get('accountList', [])
-        type = data.get('type')
-        title = data.get('title') or data.get('biliTitle') or ''
-        tags = normalize_publish_tags(data.get('tags'), max_count=get_publish_tag_limit(type))
-        category = data.get('category')
-        enableTimer = data.get('enableTimer')
-        cover_path = data.get('coverPath')
-        cover_paths = data.get('coverPaths') if isinstance(data.get('coverPaths'), dict) else {}
-        debug_dry_run = DEBUG_SKIP_FINAL_PUBLISH if 'debugDryRun' not in data else bool(data.get('debugDryRun'))
-        debug_dry_run_hold_browser = bool(data.get('debugDryRunHoldBrowser', False))
-        bili_desc = data.get('biliDesc')
-        bili_type = data.get('biliType')
-        bili_partition = data.get('biliPartition')
-        schedule_time = data.get('scheduleTime')
-        if category == 0:
-            category = None
-
-        videos_per_day = data.get('videosPerDay')
-        daily_times = data.get('dailyTimes')
-        start_days = data.get('startDays')
-        jitter_minutes = data.get('timeJitterMinutes', 0)
-        # 打印获取到的数据（仅作为示例）
-        print("File List:", file_list)
-        print("Account List:", account_list)
-        try:
-            match type:
-                case 1:
-                    post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                       start_days, cover_path=cover_path, cover_paths=cover_paths,
-                                       jitter_minutes=jitter_minutes, dry_run=debug_dry_run,
-                                       dry_run_hold_browser=debug_dry_run_hold_browser)
-                case 2:
-                    post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                       start_days, cover_path=cover_path, cover_paths=cover_paths,
-                                       jitter_minutes=jitter_minutes, dry_run=debug_dry_run,
-                                       dry_run_hold_browser=debug_dry_run_hold_browser)
-                case 3:
-                    post_video_DouYin(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                              start_days, cover_path=cover_path, cover_paths=cover_paths,
-                              jitter_minutes=jitter_minutes, dry_run=debug_dry_run,
-                              dry_run_hold_browser=debug_dry_run_hold_browser)
-                case 4:
-                    post_video_ks(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                              start_days, cover_path=cover_path, cover_paths=cover_paths,
-                              jitter_minutes=jitter_minutes, dry_run=debug_dry_run,
-                              dry_run_hold_browser=debug_dry_run_hold_browser)
-                case 5:
-                    post_video_bilibili(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                              start_days, desc=bili_desc, bili_type=bili_type, bili_partition=bili_partition,
-                              cover_path=cover_path, cover_paths=cover_paths,
-                              schedule_time=schedule_time, jitter_minutes=jitter_minutes, dry_run=debug_dry_run,
-                              dry_run_hold_browser=debug_dry_run_hold_browser)
-                case _:
-                    return jsonify({"code": 400, "msg": "unsupported platform", "data": None}), 200
-        except Exception as e:
-            print(f"postVideoBatch failed: {e}")
-            return jsonify({
-                "code": 500,
-                "msg": f"发布失败：{e}",
-                "data": None
-            }), 200
-    # 返回响应给客户端
-    return jsonify(
-        {
-            "code": 200,
-            "msg": None,
+    try:
+        batch_results = post_video_batch_tabs(data_list, dry_run=False)
+    except Exception as e:
+        print(f"postVideoBatch shared-browser publish failed: {e}")
+        return jsonify({
+            "code": 500,
+            "msg": f"发布失败：{e}",
             "data": None
         }), 200
 
+    return jsonify({
+        "code": 200,
+        "msg": None,
+        "data": {
+            "results": batch_results
+        }
+    }), 200
+
 # 包装函数：在线程中运行异步函数
-def run_async_function(type,id,status_queue, update_mode=False, record_id=None):
+def run_async_function(type,id,status_queue, update_mode=False, record_id=None, cancel_event=None):
     cookiesFile_dir = Path(BASE_DIR / "cookiesFile")
     cookiesFile_dir.mkdir(parents=False, exist_ok=True)
-    match type:
-        case '1':
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(xiaohongshu_cookie_gen(id, status_queue, update_mode, record_id))
-            loop.close()
-        case '2':
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(get_tencent_cookie(id,status_queue, update_mode, record_id))
-            loop.close()
-        case '3':
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(douyin_cookie_gen(id,status_queue, update_mode, record_id))
-            loop.close()
-        case '4':
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(get_ks_cookie(id,status_queue, update_mode, record_id))
-            loop.close()
-        case '5':
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(bilibili_cookie_gen(id,status_queue, update_mode, record_id))
-            loop.close()
+    login_task_map = {
+        '1': xiaohongshu_cookie_gen,
+        '2': get_tencent_cookie,
+        '3': douyin_cookie_gen,
+        '4': get_ks_cookie,
+        '5': bilibili_cookie_gen,
+    }
+    login_task = login_task_map.get(str(type))
+    if not login_task:
+        status_queue.put(f"ERROR: 不支持的平台类型：{type}")
+        status_queue.put("500")
+        return
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(login_task(id, status_queue, update_mode, record_id, cancel_event))
+    except Exception as e:
+        print(f"login task failed: type={type} id={id} err={e}")
+        status_queue.put(f"ERROR: 登录页面初始化失败：{e}")
+        status_queue.put("500")
+    finally:
+        loop.close()
 
 # SSE 流生成器函数
-def sse_stream(status_queue):
-    while True:
-        if not status_queue.empty():
-            msg = status_queue.get()
+def sse_stream(status_queue, first_event_timeout=60, session_key=None):
+    started_at = time.time()
+    has_sent_first_event = False
+    try:
+        while True:
+            try:
+                msg = status_queue.get(timeout=0.5)
+            except Empty:
+                if not has_sent_first_event and time.time() - started_at > first_event_timeout:
+                    yield "data: ERROR: 登录页面加载超时，未获取到二维码。请关闭弹窗后重试，或检查平台登录页是否改版、浏览器是否被拦截。\n\n"
+                    yield "data: 500\n\n"
+                    break
+                yield ": ping\n\n"
+                continue
+
+            has_sent_first_event = True
             yield f"data: {msg}\n\n"
-        else:
-            # 避免 CPU 占满
-            time.sleep(0.1)
+            if str(msg) in ("200", "500", "CANCELLED"):
+                break
+    finally:
+        if session_key:
+            active_login_sessions.pop(session_key, None)
 
 if __name__ == '__main__':
     initialize_database()
+    _quiet_local_server_startup_noise()
     app.run(host='0.0.0.0' ,port=5409)

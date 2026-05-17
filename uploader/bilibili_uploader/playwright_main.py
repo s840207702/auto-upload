@@ -12,6 +12,7 @@ from utils.base_social_media import (
     launch_publish_browser,
     new_publish_context,
     goto_and_reveal,
+    prevent_new_tabs,
     keep_browser_open_for_dry_run,
 )
 from utils.log import bilibili_logger
@@ -644,6 +645,7 @@ class BilibiliVideo:
     async def _click_publish(self, page) -> None:
         # 基于实际B站页面的发布按钮选择器
         bilibili_logger.info("[bilibili] 正在寻找发布按钮...")
+        await prevent_new_tabs(page, logger=bilibili_logger, label="B站投稿")
         
         # 基于实际HTML结构，发布按钮是span元素
         publish_selectors = [
@@ -655,25 +657,21 @@ class BilibiliVideo:
                 if await page.locator(selector).count():
                     bilibili_logger.info(f"[bilibili] 找到发布按钮: {selector}")
                     await page.locator(selector).scroll_into_view_if_needed()
-                    await page.wait_for_timeout(1000)  # 等待元素稳定
                     await page.locator(selector).click()
                     bilibili_logger.info(f"[bilibili] 成功点击发布按钮: {selector}")
-                    
-                    # 等待一下看是否有提交反应
-                    await page.wait_for_timeout(1000)
                     return
             except Exception as e:
                 bilibili_logger.warning(f"[bilibili] 发布按钮选择器失败 {selector}: {e}")
                 continue
         
-        bilibili_logger.error("[bilibili] 未找到任何发布按钮")
+        raise RuntimeError("B站未找到立即投稿按钮")
 
     async def _wait_publish_result(self, page) -> bool:
         """等待发布结果，返回是否发布成功"""
         bilibili_logger.info("[bilibili] 等待发布结果...")
         
-        # 轮询检测发布结果（最多等待60秒）
-        for i in range(60):
+        # 轮询检测发布结果。发布按钮消失即可视为已提交，避免卡住后续平台。
+        for i in range(20):
             try:
                 # 1. 检测是否出现成功提示 - 基于实际HTML结构
                 success_indicators = [
@@ -713,19 +711,17 @@ class BilibiliVideo:
                     bilibili_logger.info(f"[bilibili] 页面已跳转，可能发布成功: {current_url}")
                     return True
                 
-                # 4. 检测发布按钮是否消失（表示正在处理）
+                # 4. 检测发布按钮是否消失（表示已经提交到平台处理）
                 publish_button_exists = False
                 for selector in ['span.submit-add:has-text("立即投稿")', '.submit-add:has-text("立即投稿")']:
                     if await page.locator(selector).count():
                         publish_button_exists = True
-                        bilibili_logger.info(f"[bilibili] 发布按钮存在再点击,可能封面没有完全生成: {selector}")
-                        await page.locator(selector).click()
                         break
                 
                 if not publish_button_exists:
-                    bilibili_logger.info("[bilibili] 发布按钮已消失，可能正在处理发布")
+                    bilibili_logger.info("[bilibili] 发布按钮已消失，视为投稿已提交")
+                    return True
                 
-                # 每5秒打印一次状态
                 if i % 5 == 0:
                     bilibili_logger.info(f"[bilibili] 仍在等待发布结果... ({i}秒)")
                 
@@ -734,7 +730,7 @@ class BilibiliVideo:
             
             await asyncio.sleep(1)
         
-        bilibili_logger.warning("[bilibili] 发布结果检测超时（60秒）")
+        bilibili_logger.warning("[bilibili] 发布结果检测超时（20秒）")
         return False
 
     async def upload(self, playwright: Playwright) -> None:
@@ -822,10 +818,6 @@ class BilibiliVideo:
                 )
             return
 
-        # 等待300秒再发布（用户观察和确认）
-        bilibili_logger.info("[bilibili] waiting n seconds before publish...")
-        await asyncio.sleep(3)
-        
         # 发布
         bilibili_logger.info("[bilibili] click publish")
         await self._click_publish(page)
@@ -836,13 +828,14 @@ class BilibiliVideo:
         if publish_success:
             bilibili_logger.info("[bilibili] 视频发布成功！")
         else:
-            bilibili_logger.error("[bilibili] 视频发布失败或超时")
+            raise RuntimeError("B站点击投稿后未确认提交成功")
 
         # 保存cookie
         await context.storage_state(path=str(self.account_file))
         # 关闭浏览器上下文和浏览器实例
-        await context.close()
-        await browser.close()
+        if managed_browser:
+            await context.close()
+            await browser.close()
         
     async def main(self) -> None:
         from playwright.async_api import async_playwright

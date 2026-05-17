@@ -30,5 +30,10 @@ export const accountApi = {
   // 抓取/刷新账号真实头像
   refreshAvatar(id) {
     return http.post('/refreshAccountAvatar', { id })
+  },
+
+  // 取消扫码登录流程
+  cancelLogin(requestId) {
+    return http.post('/cancelLogin', { requestId })
   }
 }

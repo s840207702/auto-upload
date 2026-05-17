@@ -12,6 +12,6 @@ LOCAL_CHROME_PATH = ""
 USE_SYSTEM_BROWSER = False
 
 # Safety guard for development and public examples:
-# True means the automation stops before clicking the final publish button.
-DEBUG_SKIP_FINAL_PUBLISH = True
+# False means the automation clicks the final publish/schedule button.
+DEBUG_SKIP_FINAL_PUBLISH = False
 DEBUG_DRY_RUN_HOLD_SECONDS = 15

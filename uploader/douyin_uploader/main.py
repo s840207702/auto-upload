@@ -167,6 +167,30 @@ class DouYinVideo(object):
             added += 1
         douyin_logger.info(f"抖音作品描述已写入标题和{added}个话题")
 
+    async def wait_publish_button_ready(self, page):
+        publish_button = page.get_by_role('button', name="发布", exact=True).last
+        await publish_button.wait_for(state="visible", timeout=60000)
+
+        for attempt in range(60):
+            try:
+                button_class = await publish_button.get_attribute("class") or ""
+                disabled_attr = await publish_button.get_attribute("disabled")
+                aria_disabled = await publish_button.get_attribute("aria-disabled")
+                is_enabled = await publish_button.is_enabled(timeout=1000)
+                if (
+                    is_enabled
+                    and disabled_attr is None
+                    and aria_disabled != "true"
+                    and "disabled" not in button_class.lower()
+                ):
+                    await publish_button.scroll_into_view_if_needed(timeout=3000)
+                    return publish_button
+            except Exception as e:
+                douyin_logger.warning(f"抖音发布按钮状态检测失败，第{attempt + 1}次重试: {e}")
+            await page.wait_for_timeout(1000)
+
+        raise RuntimeError("抖音发布按钮长时间不可用，已停止点击，避免重复触发页面闪动")
+
     async def upload(self, playwright: Playwright) -> None:
         page = getattr(self, "external_page", None)
         context = getattr(self, "external_context", None)
@@ -248,26 +272,43 @@ class DouYinVideo(object):
                 )
             return
 
-        # 判断视频是否发布成功
-        while True:
-            # 判断视频是否发布成功
+        publish_button = await self.wait_publish_button_ready(page)
+        douyin_logger.info("抖音发布按钮已可用，准备点击发布")
+
+        async def close_unexpected_publish_popup(popup):
             try:
-                publish_button = page.get_by_role('button', name="发布", exact=True)
-                if await publish_button.count():
-                    await publish_button.click()
-                await page.wait_for_url("https://creator.douyin.com/creator-micro/content/manage**",
-                                        timeout=3000)  # 如果自动跳转到作品页面，则代表发布成功
-                douyin_logger.success("  [-]视频发布成功")
-                break
-            except:
-                douyin_logger.info("  [-] 视频正在发布中...")
-                screenshot_path = os.path.join(DOUYIN_SCREENSHOT_DIR, f"douyin_{int(asyncio.get_event_loop().time()*1000)}.png")
-                await page.screenshot(path=screenshot_path, full_page=True)
-                await asyncio.sleep(0.5)
+                await popup.wait_for_load_state("commit", timeout=1500)
+            except Exception:
+                pass
+            try:
+                douyin_logger.warning(f"抖音发布瞬间检测到异常新标签页，已关闭: {popup.url}")
+                await popup.close()
+            except Exception:
+                pass
+
+        def on_new_page(popup):
+            asyncio.create_task(close_unexpected_publish_popup(popup))
+
+        context.on("page", on_new_page)
+        try:
+            await publish_button.click(timeout=10000)
+            await page.wait_for_url(
+                "https://creator.douyin.com/creator-micro/content/manage**",
+                timeout=90000,
+            )
+            douyin_logger.success("  [-]视频发布成功")
+        except Exception as e:
+            screenshot_path = os.path.join(DOUYIN_SCREENSHOT_DIR, f"douyin_publish_timeout_{int(asyncio.get_event_loop().time()*1000)}.png")
+            await page.screenshot(path=screenshot_path, full_page=True)
+            raise RuntimeError(f"抖音点击发布后未确认跳转，已保留截图：{screenshot_path}") from e
+        finally:
+            try:
+                context.remove_listener("page", on_new_page)
+            except Exception:
+                pass
 
         await context.storage_state(path=self.account_file)  # 保存cookie
         douyin_logger.success('  [-]cookie更新完毕！')
-        await asyncio.sleep(2)  # 这里延迟是为了方便眼睛直观的观看
         # 关闭浏览器上下文和浏览器实例
         if managed_browser:
             await context.close()

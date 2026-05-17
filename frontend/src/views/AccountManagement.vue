@@ -149,14 +149,15 @@
       :title="dialogTitle"
       width="520px"
       :close-on-click-modal="false"
-      :close-on-press-escape="!sseConnecting"
-      :show-close="!sseConnecting"
+      :close-on-press-escape="true"
+      :show-close="true"
+      :before-close="handleDialogBeforeClose"
     >
       <el-form :model="accountForm" label-width="110px" :rules="rules" ref="accountFormRef">
         <el-form-item label="账号主体" prop="name">
           <el-input
             v-model="accountForm.name"
-            placeholder="例如：飞哥技术号、小说矩阵01"
+            placeholder="例如：非哥技术号、小说矩阵01"
             :disabled="sseConnecting"
           />
         </el-form-item>
@@ -190,14 +191,14 @@
           </div>
           <div v-else-if="loginStatus === '500'" class="error-wrapper">
             <el-icon><CircleCloseFilled /></el-icon>
-            <span>绑定失败，请稍后再试</span>
+            <span>{{ loginError || '绑定失败，请稍后再试' }}</span>
           </div>
         </div>
       </el-form>
 
       <template #footer>
         <span class="dialog-footer">
-          <el-button @click="dialogVisible = false" :disabled="sseConnecting">取消</el-button>
+          <el-button @click="handleLoginCancel" :loading="isCancellingLogin">取消</el-button>
           <el-button
             type="primary"
             @click="submitAccountForm"
@@ -254,9 +255,14 @@ const rules = {
 }
 
 const sseConnecting = ref(false)
+const isCancellingLogin = ref(false)
 const qrCodeData = ref('')
 const loginStatus = ref('')
+const loginError = ref('')
+const currentLoginRequestId = ref('')
+const lastLoggedInAccountId = ref(null)
 let eventSource = null
+let loginRequestTimer = null
 let accountStatusPollingTimer = null
 
 const dialogTitle = computed(() => {
@@ -389,6 +395,19 @@ const fetchAccounts = async (validate = false, options = {}) => {
   }
 }
 
+const refreshAccountIdentities = async (accountIds, options = {}) => {
+  const ids = Array.from(new Set(accountIds.filter(Boolean)))
+  if (!ids.length) return
+  const silent = options.silent === true
+  try {
+    await Promise.allSettled(ids.map(id => accountApi.refreshAvatar(id)))
+    await fetchAccounts(false, { silent: true })
+  } catch (error) {
+    console.error('刷新账号资料失败:', error)
+    if (!silent) ElMessage.warning('账号已登录，资料刷新稍后可重试')
+  }
+}
+
 const stopAccountStatusPolling = () => {
   if (accountStatusPollingTimer) {
     window.clearInterval(accountStatusPollingTimer)
@@ -398,6 +417,7 @@ const stopAccountStatusPolling = () => {
 
 const startAccountStatusPolling = (accountIds, successMessage = '账号状态已更新') => {
   const pendingIds = new Set(accountIds)
+  const refreshedIds = new Set()
   if (!pendingIds.size) return
   stopAccountStatusPolling()
 
@@ -406,10 +426,19 @@ const startAccountStatusPolling = (accountIds, successMessage = '账号状态已
     elapsed += 2
     await fetchAccounts(false, { silent: true })
 
+    const readyIds = []
     for (const account of accountStore.accounts) {
       if (pendingIds.has(account.id) && account.status === '正常') {
         pendingIds.delete(account.id)
+        if (!refreshedIds.has(account.id)) {
+          refreshedIds.add(account.id)
+          readyIds.push(account.id)
+        }
       }
+    }
+
+    if (readyIds.length) {
+      await refreshAccountIdentities(readyIds, { silent: true })
     }
 
     if (!pendingIds.size) {
@@ -485,6 +514,7 @@ const handleAddAccount = (profileName = '', platformName = '') => {
   sseConnecting.value = false
   qrCodeData.value = ''
   loginStatus.value = ''
+  loginError.value = ''
   dialogVisible.value = true
 }
 
@@ -497,6 +527,7 @@ const handleReAdd = (account) => {
   sseConnecting.value = false
   qrCodeData.value = ''
   loginStatus.value = ''
+  loginError.value = ''
   dialogVisible.value = true
 }
 
@@ -530,13 +561,59 @@ const closeSSEConnection = () => {
     eventSource.close()
     eventSource = null
   }
+  if (loginRequestTimer) {
+    clearTimeout(loginRequestTimer)
+    loginRequestTimer = null
+  }
+}
+
+const createLoginRequestId = () => {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID()
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+const resetLoginProgress = () => {
+  sseConnecting.value = false
+  isCancellingLogin.value = false
+  qrCodeData.value = ''
+  loginStatus.value = ''
+  loginError.value = ''
+  currentLoginRequestId.value = ''
+  lastLoggedInAccountId.value = null
+}
+
+const handleLoginCancel = async (options = {}) => {
+  const closeDialog = options.closeDialog !== false
+  const requestId = currentLoginRequestId.value
+
+  if (sseConnecting.value && requestId) {
+    isCancellingLogin.value = true
+    try {
+      await accountApi.cancelLogin(requestId)
+    } catch (error) {
+      console.error('取消登录失败:', error)
+      ElMessage.warning('已关闭弹窗，本次登录浏览器可能需要手动关闭')
+    }
+  }
+
+  closeSSEConnection()
+  resetLoginProgress()
+  if (closeDialog) dialogVisible.value = false
+}
+
+const handleDialogBeforeClose = async (done) => {
+  await handleLoginCancel({ closeDialog: false })
+  done()
 }
 
 const connectSSE = (platform, profileName, recordId = null) => {
   closeSSEConnection()
   sseConnecting.value = true
+  isCancellingLogin.value = false
   qrCodeData.value = ''
   loginStatus.value = ''
+  loginError.value = ''
+  currentLoginRequestId.value = createLoginRequestId()
 
   const platformTypeMap = {
     '小红书': '1',
@@ -547,15 +624,55 @@ const connectSSE = (platform, profileName, recordId = null) => {
   }
 
   const type = platformTypeMap[platform] || '1'
-  const params = new URLSearchParams({ type, id: profileName })
+  const params = new URLSearchParams({
+    type,
+    id: profileName,
+    request_id: currentLoginRequestId.value
+  })
   if (recordId) {
     params.append('update', '1')
     params.append('record_id', String(recordId))
   }
 
   eventSource = new EventSource(`${apiBaseUrl}/login?${params.toString()}`)
+  loginRequestTimer = setTimeout(() => {
+    if (sseConnecting.value && !qrCodeData.value && !loginStatus.value) {
+      loginStatus.value = '500'
+      loginError.value = '登录页面加载超时，暂未获取到二维码。请关闭弹窗后重试。'
+      ElMessage.error(loginError.value)
+      closeSSEConnection()
+      setTimeout(() => {
+        sseConnecting.value = false
+      }, 1200)
+    }
+  }, 65000)
+
   eventSource.onmessage = (event) => {
     const data = event.data
+    if (data.startsWith('ERROR:')) {
+      loginStatus.value = '500'
+      loginError.value = data.replace(/^ERROR:\s*/, '') || '绑定失败，请稍后再试'
+      ElMessage.error(loginError.value)
+      closeSSEConnection()
+      setTimeout(() => {
+        sseConnecting.value = false
+      }, 1200)
+      return
+    }
+
+    if (data === 'CANCELLED') {
+      closeSSEConnection()
+      resetLoginProgress()
+      dialogVisible.value = false
+      return
+    }
+
+    if (data.startsWith('ACCOUNT_ID:')) {
+      const accountId = Number(data.replace('ACCOUNT_ID:', ''))
+      lastLoggedInAccountId.value = Number.isFinite(accountId) ? accountId : null
+      return
+    }
+
     if (!qrCodeData.value && data.length > 100) {
       qrCodeData.value = data.startsWith('data:image') ? data : `data:image/png;base64,${data}`
       return
@@ -563,28 +680,38 @@ const connectSSE = (platform, profileName, recordId = null) => {
 
     if (data === '200' || data === '500') {
       loginStatus.value = data
+      closeSSEConnection()
       if (data === '200') {
-        setTimeout(() => {
-          closeSSEConnection()
+        setTimeout(async () => {
           dialogVisible.value = false
-          sseConnecting.value = false
+          const accountId = lastLoggedInAccountId.value || recordId
+          resetLoginProgress()
           ElMessage.success(recordId ? '重新登录成功' : '绑定成功')
-          fetchAccounts(false)
+          if (accountId) {
+            await refreshAccountIdentities([accountId], { silent: true })
+          } else {
+            await fetchAccounts(false)
+          }
         }, 900)
       } else {
-        closeSSEConnection()
+        loginError.value = loginError.value || '绑定失败，请稍后再试'
         setTimeout(() => {
           sseConnecting.value = false
           qrCodeData.value = ''
-          loginStatus.value = ''
         }, 1200)
       }
     }
   }
 
   eventSource.onerror = (error) => {
+    if (loginStatus.value === '200' || loginStatus.value === '500' || isCancellingLogin.value) {
+      closeSSEConnection()
+      return
+    }
     console.error('SSE连接错误:', error)
     ElMessage.error('连接服务器失败')
+    loginError.value = '连接服务器失败，请确认后端服务仍在运行'
+    loginStatus.value = '500'
     closeSSEConnection()
     sseConnecting.value = false
   }
@@ -602,6 +729,9 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  if (currentLoginRequestId.value) {
+    accountApi.cancelLogin(currentLoginRequestId.value).catch(() => {})
+  }
   closeSSEConnection()
   stopAccountStatusPolling()
 })

@@ -39,6 +39,7 @@ PUBLISH_WINDOW_Y = 36
 PUBLISH_WINDOW_MARGIN = 24
 HIDDEN_WINDOW_X = -32000
 HIDDEN_WINDOW_Y = -32000
+_REVEALED_WINDOW_IDS = set()
 
 
 async def launch_chromium_with_codecs(
@@ -166,16 +167,19 @@ async def new_publish_context(browser, storage_state: Optional[str] = None, **kw
 
 
 async def reveal_page_window(page):
-    """Move the off-screen browser window into view after navigation has settled."""
+    """Move the off-screen browser window into view once, then only switch tabs."""
     try:
         session = await page.context.new_cdp_session(page)
         window_info = await session.send("Browser.getWindowForTarget")
-        # First move the off-screen window back to the primary display, then maximize it.
-        # Combining explicit bounds with windowState=maximized is rejected by Chrome.
+        window_id = window_info["windowId"]
+        if window_id in _REVEALED_WINDOW_IDS:
+            await page.bring_to_front()
+            return
+
         await session.send(
             "Browser.setWindowBounds",
             {
-                "windowId": window_info["windowId"],
+                "windowId": window_id,
                 "bounds": {
                     "windowState": "normal",
                     "left": PUBLISH_WINDOW_X,
@@ -185,15 +189,8 @@ async def reveal_page_window(page):
                 },
             },
         )
-        await session.send(
-            "Browser.setWindowBounds",
-            {
-                "windowId": window_info["windowId"],
-                "bounds": {
-                    "windowState": "maximized",
-                },
-            },
-        )
+        _REVEALED_WINDOW_IDS.add(window_id)
+        await page.bring_to_front()
         return
     except Exception as e:
         print(f"[launch] reveal via cdp failed: {e}")
@@ -222,6 +219,36 @@ async def goto_and_reveal(page, url: str, wait_until: str = "domcontentloaded", 
         return await page.goto(url, **goto_options)
     finally:
         await reveal_page_window(page)
+
+
+async def prevent_new_tabs(page, logger=None, label: str = "发布"):
+    """Prevent platform submit clicks from opening transient blank/helper tabs."""
+    try:
+        await page.evaluate(
+            """(label) => {
+                if (window.__sauPreventNewTabsInstalled) return;
+                window.__sauPreventNewTabsInstalled = true;
+                window.__sauOriginalWindowOpen = window.open;
+                window.open = (...args) => {
+                    console.debug(`[SAU] blocked window.open during ${label}`, args);
+                    return null;
+                };
+                const normalizeTargets = () => {
+                    document.querySelectorAll('a[target="_blank"], form[target="_blank"]').forEach(node => {
+                        node.setAttribute('target', '_self');
+                    });
+                };
+                normalizeTargets();
+                const observer = new MutationObserver(normalizeTargets);
+                observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['target'] });
+            }""",
+            label,
+        )
+    except Exception as e:
+        if logger:
+            logger.warning(f"{label} 新标签拦截脚本注入失败: {e}")
+        else:
+            print(f"{label} new-tab blocker inject failed: {e}")
 
 
 async def keep_browser_open_for_dry_run(

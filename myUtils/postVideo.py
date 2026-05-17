@@ -62,7 +62,9 @@ def _merge_storage_states(account_files):
     merged_cookies = {}
     merged_origins = {}
     for account_file in account_files:
-        storage_path = Path(BASE_DIR / "cookiesFile" / account_file)
+        storage_path = Path(account_file)
+        if not storage_path.is_absolute():
+            storage_path = Path(BASE_DIR / "cookiesFile" / storage_path)
         if not storage_path.exists():
             continue
         try:
@@ -109,7 +111,7 @@ def _build_publish_datetimes(file_count, enable_timer, videos_per_day, daily_tim
     return [0 for _ in range(file_count)]
 
 
-def _make_platform_app(data, file_path, publish_datetime, cookie_path):
+def _make_platform_app(data, file_path, publish_datetime, cookie_path, dry_run=True):
     platform_type = int(data.get("type"))
     title = data.get("title") or data.get("biliTitle") or ""
     tags = normalize_publish_tags(data.get("tags"), max_count=get_publish_tag_limit(platform_type))
@@ -122,19 +124,19 @@ def _make_platform_app(data, file_path, publish_datetime, cookie_path):
     if platform_type == 1:
         thumb = _resolve_video_file_path(cover_path)
         thumbs = _resolve_cover_paths(cover_paths)
-        return XiaoHongShuVideo(title, file_path, tags, publish_datetime, cookie_path, thumbnail_path=thumb, thumbnail_paths=thumbs, dry_run=True)
+        return XiaoHongShuVideo(title, file_path, tags, publish_datetime, cookie_path, thumbnail_path=thumb, thumbnail_paths=thumbs, dry_run=dry_run)
     if platform_type == 2:
         thumb = _resolve_video_file_path(cover_path)
         thumbs = _resolve_cover_paths(cover_paths)
-        return TencentVideo(title, file_path, tags, publish_datetime, cookie_path, category, thumbnail_path=thumb, thumbnail_paths=thumbs, dry_run=True)
+        return TencentVideo(title, file_path, tags, publish_datetime, cookie_path, category, thumbnail_path=thumb, thumbnail_paths=thumbs, dry_run=dry_run)
     if platform_type == 3:
         thumb = _resolve_cover_file_path(cover_path, prepare=True)
         thumbs = _resolve_cover_paths(cover_paths, prepare=True)
-        return DouYinVideo(title, file_path, tags, publish_datetime, cookie_path, category=category, thumbnail_path=thumb, thumbnail_paths=thumbs, dry_run=True)
+        return DouYinVideo(title, file_path, tags, publish_datetime, cookie_path, category=category, thumbnail_path=thumb, thumbnail_paths=thumbs, dry_run=dry_run)
     if platform_type == 4:
         thumbs = _resolve_cover_paths(cover_paths)
         thumb = thumbs.get("3:4") or thumbs.get("4:3") or _resolve_video_file_path(cover_path)
-        return KSVideo(title, file_path, tags, publish_datetime, cookie_path, thumbnail_path=thumb, thumbnail_paths=thumbs, dry_run=True)
+        return KSVideo(title, file_path, tags, publish_datetime, cookie_path, thumbnail_path=thumb, thumbnail_paths=thumbs, dry_run=dry_run)
     if platform_type == 5:
         thumbs = _resolve_cover_paths(cover_paths)
         bili_cover_path = thumbs.get("16:9") or thumbs.get("4:3") or _resolve_video_file_path(cover_path)
@@ -149,25 +151,44 @@ def _make_platform_app(data, file_path, publish_datetime, cookie_path):
             desc=data.get("biliDesc"),
             bili_type=data.get("biliType"),
             partition=data.get("biliPartition"),
-            dry_run=True,
+            dry_run=dry_run,
         )
     raise ValueError(f"unsupported platform: {platform_type}")
 
 
-async def _post_video_batch_dry_run_tabs_async(data_list):
-    account_files = []
-    for data in data_list:
-        account_files.extend(data.get("accountList") or [])
+def _platform_publish_url(platform_type):
+    return {
+        1: "https://creator.xiaohongshu.com/publish/publish?from=homepage&target=video",
+        2: "https://channels.weixin.qq.com/platform/post/create",
+        3: "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
+        4: "https://cp.kuaishou.com/article/publish/video",
+        5: "https://member.bilibili.com/platform/upload/video/frame?page_from=creative_home_top_upload",
+    }.get(platform_type)
 
+
+async def _prepare_batch_pages(context, jobs):
+    pages = []
+    for job in jobs:
+        page = await context.new_page()
+        pages.append(page)
+        url = _platform_publish_url(job["platform_type"])
+        if not url:
+            continue
+        try:
+            await page.goto(url, wait_until="commit", timeout=30000)
+            await page.wait_for_timeout(300)
+        except Exception as e:
+            print(f"[postVideoBatch] preload page failed type={job['platform_type']}: {e}")
+    return pages
+
+
+async def _post_video_batch_tabs_async(data_list, dry_run=True):
     async with async_playwright() as playwright:
         browser = await launch_publish_browser(playwright)
-        context = await new_publish_context(
-            browser,
-            storage_state=_merge_storage_states(account_files),
-        )
-        context = await set_init_script(context)
-        pages = []
+        jobs = []
         results = []
+        context = None
+        pages = []
 
         try:
             for data in data_list:
@@ -184,46 +205,74 @@ async def _post_video_batch_dry_run_tabs_async(data_list):
                     schedule_time=data.get("scheduleTime"),
                 )
 
-                platform_failed = False
                 for index, file_path in enumerate(files):
-                    if platform_failed:
-                        break
                     for cookie_path in cookies:
-                        page = await context.new_page()
-                        pages.append(page)
-                        app = _make_platform_app(data, file_path, publish_datetimes[index], cookie_path)
-                        app.external_page = page
-                        app.external_context = context
-                        app.external_browser = browser
-                        try:
-                            await app.upload(playwright)
-                            results.append({
-                                "type": platform_type,
-                                "ok": True,
-                                "message": None,
-                            })
-                        except Exception as e:
-                            print(f"[postVideoBatch] platform dry-run failed type={platform_type}: {e}")
-                            results.append({
-                                "type": platform_type,
-                                "ok": False,
-                                "message": str(e),
-                            })
-                            platform_failed = True
-                            break
+                        jobs.append({
+                            "data": data,
+                            "platform_type": platform_type,
+                            "file_path": file_path,
+                            "cookie_path": cookie_path,
+                            "publish_datetime": publish_datetimes[index],
+                        })
 
-            if pages:
+            # Keep one browser window with multiple tabs. Put video account states last
+            # so their stricter local/origin state wins when origins overlap.
+            merged_cookie_paths = [
+                job["cookie_path"]
+                for job in sorted(jobs, key=lambda item: 1 if item["platform_type"] == 2 else 0)
+            ]
+            context = await new_publish_context(
+                browser,
+                storage_state=_merge_storage_states(merged_cookie_paths),
+            )
+            context = await set_init_script(context)
+
+            pages = await _prepare_batch_pages(context, jobs)
+            failed_platforms = set()
+            for job, page in zip(jobs, pages):
+                platform_type = job["platform_type"]
+                if platform_type in failed_platforms:
+                    continue
+
+                app = _make_platform_app(
+                    job["data"],
+                    job["file_path"],
+                    job["publish_datetime"],
+                    job["cookie_path"],
+                    dry_run=dry_run,
+                )
+                app.external_page = page
+                app.external_context = context
+                app.external_browser = browser
+                try:
+                    await app.upload(playwright)
+                    results.append({
+                        "type": platform_type,
+                        "ok": True,
+                        "message": None,
+                    })
+                except Exception as e:
+                    print(f"[postVideoBatch] platform {'dry-run' if dry_run else 'publish'} failed type={platform_type}: {e}")
+                    results.append({
+                        "type": platform_type,
+                        "ok": False,
+                        "message": str(e),
+                    })
+                    failed_platforms.add(platform_type)
+
+            if dry_run and pages:
                 await reveal_page_window(pages[0])
-            print("[postVideoBatch] dry-run tabs ready, waiting for manual browser close...")
-            while browser.is_connected():
-                if pages and all(page.is_closed() for page in pages):
-                    break
-                await asyncio.sleep(1)
+                print("[postVideoBatch] dry-run tabs ready, waiting for manual browser close...")
+                while browser.is_connected():
+                    if pages and all(page.is_closed() for page in pages):
+                        break
+                    await asyncio.sleep(1)
         finally:
-            try:
-                await context.close()
-            except Exception:
-                pass
+            if context:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
             try:
                 await browser.close()
             except Exception:
@@ -232,7 +281,11 @@ async def _post_video_batch_dry_run_tabs_async(data_list):
 
 
 def post_video_batch_dry_run_tabs(data_list):
-    return asyncio.run(_post_video_batch_dry_run_tabs_async(data_list), debug=False)
+    return asyncio.run(_post_video_batch_tabs_async(data_list, dry_run=True), debug=False)
+
+
+def post_video_batch_tabs(data_list, dry_run=False):
+    return asyncio.run(_post_video_batch_tabs_async(data_list, dry_run=dry_run), debug=False)
 
 
 def post_video_tencent(title,files,tags,account_file,category=TencentZoneTypes.LIFESTYLE.value,enableTimer=False,videos_per_day = 1, daily_times=None,start_days = 0, cover_path: str | None = None, cover_paths: dict | None = None, jitter_minutes=0, dry_run=False, dry_run_hold_browser=True):

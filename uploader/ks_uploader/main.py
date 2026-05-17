@@ -4,6 +4,7 @@ from datetime import datetime
 from playwright.async_api import Page, Playwright, async_playwright
 import os
 import asyncio
+import re
 
 from conf import LOCAL_CHROME_PATH
 from utils.base_social_media import (
@@ -11,6 +12,7 @@ from utils.base_social_media import (
     launch_publish_browser,
     new_publish_context,
     goto_and_reveal,
+    reveal_page_window,
     keep_browser_open_for_dry_run,
 )
 from utils.files_times import get_absolute_path
@@ -106,6 +108,31 @@ class KSVideo(object):
         kuaishou_logger.error("视频出错了，重新上传中")
         await page.locator('div.progress-div [class^="upload-btn-input"]').set_input_files(self.file_path)
 
+    async def wait_publish_button_ready(self, page: Page):
+        await self.dismiss_creator_guide(page)
+        publish_button = page.get_by_text("发布", exact=True).last
+        await publish_button.wait_for(state="visible", timeout=60000)
+
+        for _ in range(60):
+            await self.dismiss_creator_guide(page)
+            try:
+                button_class = await publish_button.get_attribute("class") or ""
+                disabled_attr = await publish_button.get_attribute("disabled")
+                aria_disabled = await publish_button.get_attribute("aria-disabled")
+                if (
+                    await publish_button.is_enabled(timeout=800)
+                    and disabled_attr is None
+                    and aria_disabled != "true"
+                    and "disabled" not in button_class.lower()
+                ):
+                    await publish_button.scroll_into_view_if_needed(timeout=3000)
+                    return publish_button
+            except Exception:
+                pass
+            await page.wait_for_timeout(1000)
+
+        raise RuntimeError("快手发布按钮长时间不可用")
+
     async def upload(self, playwright: Playwright) -> None:
         page = getattr(self, "external_page", None)
         context = getattr(self, "external_context", None)
@@ -121,9 +148,8 @@ class KSVideo(object):
             context = await set_init_script(context)
             # 创建一个新的页面
             page = await context.new_page()
-        # 访问指定的 URL
-        await goto_and_reveal(
-            page,
+        # 访问指定的 URL。批量共享浏览器时先在后台完成首次加载和刷新，再切到前台，减少标签闪烁。
+        await page.goto(
             "https://cp.kuaishou.com/article/publish/video",
             wait_until="commit",
             timeout=90000,
@@ -131,24 +157,30 @@ class KSVideo(object):
         kuaishou_logger.info("快手发布页已打开，先刷新一次再开始上传")
         await page.reload(wait_until="commit", timeout=90000)
         await page.wait_for_timeout(1000)
+        await reveal_page_window(page)
+        await self.dismiss_creator_guide(page)
         kuaishou_logger.info('正在上传-------{}.mp4'.format(self.title))
         await self.upload_video_file(page)
 
         await page.locator("#work-description-edit").wait_for(state="visible", timeout=60000)
+        await self.dismiss_creator_guide(page)
 
         # 等待按钮可交互
         new_feature_button = page.locator('button[type="button"] span:text("我知道了")')
         if await new_feature_button.count() > 0:
             await new_feature_button.click()
 
+        await self.dismiss_creator_guide(page)
         await self.fill_description_and_topics(page)
         await self.wait_video_upload_done(page)
 
         if self.thumbnail_path or self.thumbnail_paths:
+            await self.dismiss_creator_guide(page)
             await self.set_thumbnail_from_cover_dialog(page)
 
         # 定时任务
         if self.publish_date != 0:
+            await self.dismiss_creator_guide(page)
             await self.set_schedule_time(page, self.publish_date)
 
         if self.dry_run:
@@ -164,34 +196,29 @@ class KSVideo(object):
                 )
             return
 
-        # 判断视频是否发布成功
-        while True:
-            try:
-                publish_button = page.get_by_text("发布", exact=True)
-                if await publish_button.count() > 0:
-                    await publish_button.click()
+        publish_button = await self.wait_publish_button_ready(page)
+        await publish_button.click(timeout=10000)
 
-                await asyncio.sleep(1)
-                confirm_button = page.get_by_text("确认发布")
-                if await confirm_button.count() > 0:
-                    await confirm_button.click()
+        confirm_button = page.get_by_text("确认发布").last
+        try:
+            if await confirm_button.count() > 0 and await confirm_button.is_visible(timeout=5000):
+                await confirm_button.click(timeout=10000)
+        except Exception:
+            pass
 
-                # 等待页面跳转，确认发布成功
-                await page.wait_for_url(
-                    "https://cp.kuaishou.com/article/manage/video?status=2&from=publish",
-                    timeout=5000,
-                )
-                kuaishou_logger.success("视频发布成功")
-                break
-            except Exception as e:
-                kuaishou_logger.info(f"视频正在发布中... 错误: {e}")
-                screenshot_path = os.path.join(KUAISHOU_SCREENSHOT_DIR, f"ks_{int(asyncio.get_event_loop().time()*1000)}.png")
-                await page.screenshot(path=screenshot_path, full_page=True)
-                await asyncio.sleep(1)
+        try:
+            await page.wait_for_url(
+                "https://cp.kuaishou.com/article/manage/video?status=2&from=publish",
+                timeout=90000,
+            )
+            kuaishou_logger.success("视频发布成功")
+        except Exception as e:
+            screenshot_path = os.path.join(KUAISHOU_SCREENSHOT_DIR, f"ks_publish_timeout_{int(asyncio.get_event_loop().time()*1000)}.png")
+            await page.screenshot(path=screenshot_path, full_page=True)
+            raise RuntimeError(f"快手点击发布后未确认成功，已保留截图：{screenshot_path}") from e
 
         await context.storage_state(path=self.account_file)  # 保存cookie
         kuaishou_logger.info('cookie更新完毕！')
-        await asyncio.sleep(2)  # 这里延迟是为了方便眼睛直观的观看
         # 关闭浏览器上下文和浏览器实例
         if managed_browser:
             await context.close()
@@ -199,6 +226,7 @@ class KSVideo(object):
 
     async def upload_video_file(self, page):
         await self.dismiss_previous_draft_prompt(page)
+        await self.dismiss_creator_guide(page)
 
         file_inputs = [
             'input[type="file"][accept*="video"]',
@@ -215,6 +243,7 @@ class KSVideo(object):
         started_at = asyncio.get_running_loop().time()
         while asyncio.get_running_loop().time() - started_at < 60:
             await self.dismiss_previous_draft_prompt(page)
+            await self.dismiss_creator_guide(page)
 
             for selector in file_inputs:
                 locator = page.locator(selector).first
@@ -242,6 +271,139 @@ class KSVideo(object):
             await asyncio.sleep(1)
         raise RuntimeError("未找到快手视频上传入口")
 
+    async def dismiss_creator_guide(self, page: Page):
+        """Dismiss Kuaishou multi-step creator guidance overlays that block inputs."""
+        progress_pattern = re.compile(r"\b[1-9]\s*/\s*[1-9]\b")
+        for _ in range(8):
+            try:
+                body_text = await page.locator("body").inner_text(timeout=1200)
+            except Exception:
+                return
+
+            next_count = await self.visible_text_count(page, "下一步")
+            guide_active = bool(progress_pattern.search(body_text)) and (
+                next_count > 0
+                or "便捷填写作品关键信息" in body_text
+                or "作品信息" in body_text
+            )
+            if not guide_active:
+                await self.click_first_visible_text(page, ["我知道了", "知道了"])
+                await self.remove_creator_guide_overlays(page)
+                return
+
+            kuaishou_logger.info("检测到快手发布页新手引导，正在自动处理")
+            if await self.click_first_visible_text(page, ["跳过", "我知道了", "知道了", "完成", "关闭"]):
+                await page.wait_for_timeout(500)
+                continue
+            if await self.click_first_visible_close_button(page):
+                await page.wait_for_timeout(500)
+                continue
+            if await self.click_first_visible_text(page, ["下一步"]):
+                await page.wait_for_timeout(700)
+                continue
+            await self.remove_creator_guide_overlays(page)
+            return
+
+        await self.remove_creator_guide_overlays(page)
+
+    async def remove_creator_guide_overlays(self, page: Page):
+        try:
+            removed = await page.evaluate(
+                r"""
+                () => {
+                  const textNeedles = ['作品信息', '便捷填写作品关键信息', '下一步', '1/4', '2/4', '3/4', '4/4'];
+                  const includesNeedle = text => textNeedles.some(needle => String(text || '').includes(needle));
+                  const removableSelectors = [
+                    '.ant-tour',
+                    '.ant-tour-mask',
+                    '.ant-tour-placeholder',
+                    '.ant-tour-target-placeholder',
+                    '.ant-popover',
+                    '.driver-overlay',
+                    '.driver-popover',
+                    '.joyride-overlay',
+                    '.joyride-tooltip',
+                    '[class*="tour"]',
+                    '[class*="guide"]'
+                  ];
+                  let removed = 0;
+
+                  const removeNode = node => {
+                    if (node && node.parentElement && node !== document.body && node !== document.documentElement) {
+                      node.remove();
+                      removed += 1;
+                    }
+                  };
+
+                  for (const selector of removableSelectors) {
+                    for (const node of Array.from(document.querySelectorAll(selector))) {
+                      const text = node.innerText || node.textContent || '';
+                      const cls = String(node.className || '').toLowerCase();
+                      const isMask = /mask|overlay|placeholder/.test(cls);
+                      if (isMask || includesNeedle(text) || /tour|driver|joyride|guide/.test(cls)) {
+                        removeNode(node);
+                      }
+                    }
+                  }
+
+                  for (const node of Array.from(document.querySelectorAll('body *'))) {
+                    if (!(node instanceof HTMLElement) || !includesNeedle(node.innerText || node.textContent)) continue;
+                    const shell = node.closest('.ant-tour, .ant-popover, [class*="tour"], [class*="guide"], [class*="driver"], [class*="joyride"]');
+                    if (shell) {
+                      removeNode(shell);
+                    }
+                  }
+
+                  document.body.style.pointerEvents = 'auto';
+                  document.documentElement.style.pointerEvents = 'auto';
+                  return removed;
+                }
+                """
+            )
+            if removed:
+                kuaishou_logger.info(f"已直接清理快手引导遮罩节点：{removed} 个")
+                await page.wait_for_timeout(300)
+        except Exception as e:
+            kuaishou_logger.debug(f"快手引导遮罩直接清理跳过：{e}")
+
+    async def click_first_visible_text(self, page: Page, texts):
+        for text in texts:
+            locator = page.get_by_text(text, exact=True)
+            count = await locator.count()
+            for index in range(count - 1, -1, -1):
+                item = locator.nth(index)
+                try:
+                    if await item.is_visible(timeout=500):
+                        await item.click(force=True, timeout=2000)
+                        kuaishou_logger.info(f"已点击快手引导按钮：{text}")
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    async def click_first_visible_close_button(self, page: Page):
+        selectors = [
+            ".ant-tour-close",
+            ".ant-popover-close",
+            ".ant-modal-close",
+            "[aria-label='Close']",
+            "[aria-label='close']",
+            "[class*='close']",
+        ]
+        for selector in selectors:
+            locator = page.locator(selector)
+            count = await locator.count()
+            for index in range(count - 1, -1, -1):
+                item = locator.nth(index)
+                try:
+                    if await item.is_visible(timeout=500):
+                        await item.click(force=True, timeout=2000)
+                        kuaishou_logger.info(f"已点击快手引导关闭按钮：{selector}")
+                        return True
+                except Exception:
+                    continue
+        return False
+
     async def dismiss_previous_draft_prompt(self, page: Page):
         try:
             body_text = await page.locator("body").inner_text(timeout=2000)
@@ -262,10 +424,7 @@ class KSVideo(object):
         kuaishou_logger.info("正在填充快手作品描述和话题...")
         editor = page.locator("#work-description-edit").first
         await editor.wait_for(state="visible", timeout=30000)
-        await editor.click(force=True, timeout=5000)
-        await page.keyboard.press("Control+KeyA")
-        await page.keyboard.press("Delete")
-        await page.keyboard.type(self.title, delay=25)
+        await self.write_description_with_retry(page, editor)
 
         async def get_tag_nodes():
             return await editor.locator(".at-tag-item").evaluate_all(
@@ -289,6 +448,7 @@ class KSVideo(object):
             kuaishou_logger.info(f"正在添加快手第{index}个话题：#{clean_tag}")
             accepted = False
             for attempt in range(1, 4):
+                await self.dismiss_creator_guide(page)
                 await editor.click(force=True, timeout=3000)
                 await page.keyboard.press("End")
                 await page.keyboard.press("Space")
@@ -321,6 +481,31 @@ class KSVideo(object):
             text = (await editor.inner_text(timeout=3000)).replace("\xa0", " ")
             raise RuntimeError(f"快手话题节点写入校验失败，缺失：{missing_tags}，当前内容：{text}，节点={tag_nodes}")
         kuaishou_logger.success("快手作品描述和话题已写入")
+
+    async def write_description_with_retry(self, page: Page, editor):
+        expected_title = (self.title or "").strip()
+        for attempt in range(1, 4):
+            await self.dismiss_creator_guide(page)
+            await editor.scroll_into_view_if_needed(timeout=3000)
+            await editor.click(force=True, timeout=5000)
+            await page.keyboard.press("Control+KeyA")
+            await page.keyboard.press("Delete")
+            if expected_title:
+                await page.keyboard.insert_text(expected_title)
+            await page.wait_for_timeout(400)
+
+            text = (await editor.inner_text(timeout=3000)).replace("\xa0", " ").strip()
+            if not expected_title or expected_title in text:
+                return
+
+            kuaishou_logger.warning(
+                f"快手作品描述第{attempt}次写入后回读为空或不一致，准备清理引导后重试：{text}"
+            )
+            await self.remove_creator_guide_overlays(page)
+            await page.wait_for_timeout(500)
+
+        text = (await editor.inner_text(timeout=3000)).replace("\xa0", " ").strip()
+        raise RuntimeError(f"快手作品描述写入失败，当前内容：{text}")
 
     async def visible_text_count(self, page: Page, text: str) -> int:
         locator = page.locator(f"text={text}")

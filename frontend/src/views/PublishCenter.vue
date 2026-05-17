@@ -296,8 +296,8 @@
           {{ debugDryRunEnabled ? '停在最终发布前' : (publishForm.scheduleEnabled ? '定时发布' : '立即发布') }}
         </span>
       </div>
-      <el-button type="primary" size="large" :loading="publishing" @click="confirmPublish">
-        {{ debugDryRunEnabled ? '预发布检查' : '发布到' }} {{ selectedPlatformAccounts.length || 0 }} 个平台
+      <el-button type="primary" size="large" :loading="publishing || accountChecking" @click="confirmPublish">
+        {{ accountChecking ? '检测账号中' : (debugDryRunEnabled ? '预发布检查' : '发布到') }} {{ selectedPlatformAccounts.length || 0 }} 个平台
       </el-button>
     </section>
 
@@ -359,7 +359,7 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { FolderOpened, UploadFilled } from '@element-plus/icons-vue'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
@@ -370,7 +370,7 @@ import { validatePublishForm } from '@/utils/formValidation'
 import ScheduleSettings from '@/components/publish/ScheduleSettings.vue'
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409'
-const debugDryRunEnabled = true
+const debugDryRunEnabled = false
 const GLOBAL_TOPIC_LIMIT = 5
 const authHeaders = computed(() => ({
   Authorization: `Bearer ${localStorage.getItem('token') || ''}`
@@ -496,6 +496,7 @@ const persistPublishDraft = () => {
 restorePublishDraft()
 
 const publishing = ref(false)
+const accountChecking = ref(false)
 const publishStatus = ref(null)
 const videoLibraryVisible = ref(false)
 const coverLibraryVisible = ref(false)
@@ -853,6 +854,83 @@ const buildPublishPayloads = () => {
   })
 }
 
+const isNormalStatus = (status) => {
+  return status === 1 || status === '1' || status === true || status === '正常'
+}
+
+const formatAccountName = (account) => {
+  return account?.name || account?.userName || account?.profileName || account?.filePath || '未命名账号'
+}
+
+const askAccountCheckBeforePublish = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '建议先检测本次发布账号的登录状态。视频号等平台登录态可能会在一天左右失效，检测可以避免上传到一半才失败。',
+      '发布前账号检测',
+      {
+        confirmButtonText: '先检测并发布',
+        cancelButtonText: '跳过检测直接发布',
+        distinguishCancelAndClose: true,
+        closeOnClickModal: false,
+        closeOnPressEscape: true,
+        type: 'info',
+        customClass: 'publish-preflight-dialog'
+      }
+    )
+    return true
+  } catch (action) {
+    if (action === 'cancel') return false
+    throw action
+  }
+}
+
+const verifySelectedAccounts = async (accountsToVerify = selectedPlatformAccounts.value) => {
+  const ids = accountsToVerify.map(account => account.id).filter(Boolean)
+  if (!ids.length) return true
+  accountChecking.value = true
+  publishStatus.value = { message: '正在检测账号登录状态...', type: 'info' }
+  try {
+    const res = await accountApi.getValidAccounts({
+      validate: 1,
+      force: 1,
+      ids: ids.join(',')
+    })
+    if (res.code === 200 && Array.isArray(res.data)) {
+      accountStore.setAccounts(res.data)
+      const idSet = new Set(ids.map(Number))
+      const invalidAccounts = res.data.filter(account => {
+        return idSet.has(Number(account.id)) && !isNormalStatus(account.status)
+      })
+
+      if (invalidAccounts.length) {
+        const message = invalidAccounts
+          .slice(0, 3)
+          .map(account => `${platformByType(account.type).name}「${formatAccountName(account)}」`)
+          .join('、')
+        const suffix = invalidAccounts.length > 3 ? ` 等 ${invalidAccounts.length} 个账号` : ''
+        publishStatus.value = {
+          message: `账号检测未通过：${message}${suffix} 登录已失效，请先重登。`,
+          type: 'warning'
+        }
+        ElMessage.warning('账号检测未通过，请先重登')
+        return false
+      }
+
+      publishStatus.value = { message: '账号检测通过，正在进入发布流程...', type: 'success' }
+      return true
+    }
+
+    publishStatus.value = { message: res.msg || '账号检测失败，请稍后重试', type: 'warning' }
+    return false
+  } catch (error) {
+    console.error('账号检测失败:', error)
+    publishStatus.value = { message: '账号检测失败，请稍后重试，或选择跳过检测直接发布。', type: 'warning' }
+    return false
+  } finally {
+    accountChecking.value = false
+  }
+}
+
 const ensurePublishReady = () => {
   const validation = validatePublishForm(publishForm)
   if (!validation.valid) return Object.values(validation.errors)[0]
@@ -877,10 +955,32 @@ const confirmPublish = async () => {
     return
   }
 
+  const payloadItems = buildPublishPayloads()
+  const expectedPlatformCount = publishForm.selectedPlatformTypes.length
+  if (payloadItems.length !== expectedPlatformCount) {
+    publishStatus.value = { message: '所选平台账号不完整，请先补齐账号后再发布。', type: 'warning' }
+    ElMessage.warning('所选平台账号不完整')
+    return
+  }
+
+  let shouldCheckAccounts = true
+  try {
+    shouldCheckAccounts = await askAccountCheckBeforePublish()
+  } catch (_) {
+    return
+  }
+
+  if (shouldCheckAccounts) {
+    const accountsOk = await verifySelectedAccounts(payloadItems.map(item => item.account))
+    if (!accountsOk) return
+  }
+
   publishing.value = true
   const results = []
   try {
-    const payloadItems = buildPublishPayloads()
+    payloadItems.forEach(item => {
+      item.payload.skipAccountCheck = true
+    })
     if (payloadItems.length > 1) {
       const response = await fetch(`${apiBaseUrl}/postVideoBatch`, {
         method: 'POST',
@@ -976,6 +1076,31 @@ const resetForm = () => {
 </script>
 
 <style lang="scss" scoped>
+:global(.publish-preflight-dialog) {
+  width: min(440px, calc(100vw - 32px));
+  border-radius: 18px;
+  padding: 18px;
+
+  .el-message-box__title {
+    color: #1d1d1f;
+    font-size: 17px;
+    font-weight: 720;
+  }
+
+  .el-message-box__message {
+    color: #6e6e73;
+    line-height: 1.75;
+  }
+
+  .el-message-box__btns {
+    gap: 10px;
+  }
+
+  .el-button {
+    border-radius: 10px;
+  }
+}
+
 .publish-center {
   min-width: 0;
   min-height: 100%;
