@@ -110,24 +110,45 @@ class DouYinVideo(object):
 
         date_input = page.locator('.semi-input[placeholder="日期和时间"]').last
         await date_input.wait_for(state="visible", timeout=15000)
-        for attempt in range(1, 4):
-            await date_input.click(force=True, timeout=5000)
-            await page.keyboard.press("Control+KeyA")
-            await page.keyboard.press("Delete")
-            await page.keyboard.type(target_time, delay=20)
-            await page.keyboard.press("Enter")
-            await page.wait_for_timeout(1200)
+        await date_input.click(force=True, timeout=5000)
+        await date_input.fill(target_time, timeout=5000)
+        await page.keyboard.press("Enter")
+        await page.wait_for_timeout(800)
 
-            try:
-                actual_time = (await date_input.input_value(timeout=3000)).strip()
-            except Exception:
-                actual_time = ""
-            if actual_time == target_time:
-                douyin_logger.success(f"抖音定时发布时间已确认：{actual_time}")
-                return
-            douyin_logger.warning(f"抖音定时时间第{attempt}次回读不一致：目标={target_time}，实际={actual_time}")
+        try:
+            await date_input.evaluate(
+                """
+                node => {
+                  node.dispatchEvent(new Event('input', { bubbles: true }));
+                  node.dispatchEvent(new Event('change', { bubbles: true }));
+                  node.blur();
+                }
+                """
+            )
+        except Exception:
+            await page.keyboard.press("Escape")
+        await page.wait_for_timeout(800)
 
-        raise RuntimeError(f"抖音定时发布时间写入失败，目标={target_time}")
+        try:
+            actual_time = (await date_input.input_value(timeout=3000)).strip()
+        except Exception:
+            actual_time = ""
+
+        if self._schedule_time_matches(actual_time, target_time):
+            douyin_logger.success(f"抖音定时发布时间已确认：{actual_time or target_time}")
+            return
+
+        raise RuntimeError(f"抖音定时发布时间写入失败，目标={target_time}，实际={actual_time}")
+
+    @staticmethod
+    def _schedule_time_matches(actual_time: str, target_time: str) -> bool:
+        normalized_actual = "".join(str(actual_time or "").split())
+        normalized_target = "".join(str(target_time or "").split())
+        return bool(normalized_actual) and (
+            normalized_actual == normalized_target
+            or normalized_actual.startswith(normalized_target)
+            or normalized_target in normalized_actual
+        )
 
     async def handle_upload_error(self, page):
         douyin_logger.info('视频出错了，重新上传中')

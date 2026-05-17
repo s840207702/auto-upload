@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>自媒体一键分发｜新手使用教程</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --paper: #ffffff;
+      --paper-soft: #f8fafc;
+      --ink: #172033;
+      --muted: #667085;
+      --faint: #98a2b3;
+      --line: #e5eaf2;
+      --accent: #2f7df6;
+      --accent-soft: #eaf2ff;
+      --success: #16803c;
+      --warning: #a15c07;
+      --danger: #c23131;
+      --shadow: 0 22px 60px rgba(31, 41, 55, 0.10);
+      --radius-xl: 28px;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+      --radius-sm: 10px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(47, 125, 246, 0.08), transparent 32rem),
+        linear-gradient(180deg, #fbfcff 0%, var(--bg) 48%, #eef3f8 100%);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      letter-spacing: 0;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .shell {
+      width: min(1160px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 32px 0 64px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 28px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .mark {
+      width: 32px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      background: #0f172a;
+      color: #fff;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.72fr);
+      gap: 26px;
+      align-items: stretch;
+      margin-bottom: 26px;
+    }
+
+    .hero-main,
+    .quick-card,
+    .section,
+    .toc {
+      background: rgba(255, 255, 255, 0.88);
+      border: 1px solid rgba(229, 234, 242, 0.92);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+
+    .hero-main {
+      padding: 40px;
+      border-radius: var(--radius-xl);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 11px;
+      margin-bottom: 20px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: #1f62c7;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    h1 {
+      max-width: 760px;
+      margin: 0;
+      font-size: 42px;
+      line-height: 1.16;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 760px;
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 17px;
+      line-height: 1.85;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 30px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 38px;
+      padding: 8px 13px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .quick-card {
+      border-radius: var(--radius-xl);
+      padding: 28px;
+    }
+
+    .quick-card h2,
+    .section h2,
+    .toc h2 {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+
+    .quick-list {
+      display: grid;
+      gap: 13px;
+      margin-top: 22px;
+    }
+
+    .quick-item {
+      display: grid;
+      grid-template-columns: 30px minmax(0, 1fr);
+      gap: 12px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: var(--paper-soft);
+    }
+
+    .number {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      background: #111827;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .quick-item strong {
+      display: block;
+      margin-bottom: 3px;
+      font-size: 15px;
+    }
+
+    .quick-item span {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 250px minmax(0, 1fr);
+      gap: 26px;
+      align-items: start;
+    }
+
+    .toc {
+      position: sticky;
+      top: 24px;
+      border-radius: var(--radius-lg);
+      padding: 20px;
+    }
+
+    .toc h2 {
+      font-size: 15px;
+      color: var(--ink);
+    }
+
+    .toc nav {
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .toc a {
+      padding: 9px 10px;
+      border-radius: 10px;
+      color: var(--muted);
+      font-size: 14px;
+      transition: background 0.18s ease, color 0.18s ease;
+    }
+
+    .toc a:hover {
+      background: var(--accent-soft);
+      color: #1f62c7;
+    }
+
+    .content {
+      display: grid;
+      gap: 22px;
+    }
+
+    .section {
+      border-radius: var(--radius-xl);
+      padding: 30px;
+    }
+
+    .section > p {
+      margin: 12px 0 0;
+      color: var(--muted);
+      line-height: 1.8;
+    }
+
+    .steps {
+      display: grid;
+      gap: 14px;
+      margin-top: 22px;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr);
+      gap: 15px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: #fff;
+    }
+
+    .step-index {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 14px;
+      background: var(--accent-soft);
+      color: #1f62c7;
+      font-weight: 800;
+    }
+
+    .step h3 {
+      margin: 0 0 7px;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+
+    .step p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.75;
+    }
+
+    .callout {
+      margin-top: 18px;
+      padding: 16px 18px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--line);
+      background: var(--paper-soft);
+      color: var(--muted);
+      line-height: 1.75;
+    }
+
+    .callout strong {
+      color: var(--ink);
+    }
+
+    .callout.success {
+      border-color: rgba(22, 128, 60, 0.2);
+      background: #eefaf3;
+      color: #276749;
+    }
+
+    .callout.warning {
+      border-color: rgba(161, 92, 7, 0.24);
+      background: #fff7e8;
+      color: #8a4b05;
+    }
+
+    .callout.danger {
+      border-color: rgba(194, 49, 49, 0.18);
+      background: #fff1f1;
+      color: #9f2a2a;
+    }
+
+    .grid-two {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 20px;
+    }
+
+    .mini-card {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: #fff;
+    }
+
+    .mini-card h3 {
+      margin: 0 0 8px;
+      font-size: 16px;
+    }
+
+    .mini-card p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 14px;
+    }
+
+    .checklist {
+      display: grid;
+      gap: 10px;
+      margin: 18px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .checklist li {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .check {
+      width: 22px;
+      height: 22px;
+      display: grid;
+      place-items: center;
+      border-radius: 999px;
+      background: #eaf7ef;
+      color: var(--success);
+      font-size: 13px;
+      font-weight: 800;
+      margin-top: 2px;
+    }
+
+    code {
+      padding: 2px 6px;
+      border-radius: 7px;
+      background: #eef2f7;
+      color: #27364a;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+
+    .footer {
+      margin-top: 28px;
+      color: var(--faint);
+      text-align: center;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    @media (max-width: 920px) {
+      .hero,
+      .layout,
+      .grid-two {
+        grid-template-columns: 1fr;
+      }
+
+      .toc {
+        position: static;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .shell {
+        width: min(100% - 24px, 1160px);
+        padding-top: 20px;
+      }
+
+      .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .hero-main,
+      .quick-card,
+      .section {
+        padding: 22px;
+        border-radius: 22px;
+      }
+
+      h1 {
+        font-size: 30px;
+      }
+
+      .lead {
+        font-size: 15px;
+      }
+
+      .step {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media print {
+      body {
+        background: #fff;
+      }
+
+      .shell {
+        width: 100%;
+        padding: 0;
+      }
+
+      .toc,
+      .hero-main,
+      .quick-card,
+      .section {
+        box-shadow: none;
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark">分</span>
+        <span>自媒体一键分发</span>
+      </div>
+      <span>新手使用教程｜适用于 Windows 整合包</span>
+    </header>
+
+    <section class="hero">
+      <div class="hero-main">
+        <div class="eyebrow">从解压到发布，只看这一份</div>
+        <h1>给第一次使用的新手：如何启动整合包并完成一次发布</h1>
+        <p class="lead">
+          这个整合包已经内置运行环境，不需要安装 Python、Node 或其他编程工具。你只需要解压、双击启动、登录账号、选择素材，然后按提示发布。
+        </p>
+        <div class="hero-actions" aria-label="核心提醒">
+          <span class="pill">不要在压缩包里直接双击</span>
+          <span class="pill">先登录账号再发布</span>
+          <span class="pill">发布前建议检测账号状态</span>
+        </div>
+      </div>
+
+      <aside class="quick-card">
+        <h2>最短流程</h2>
+        <div class="quick-list">
+          <div class="quick-item">
+            <span class="number">1</span>
+            <div><strong>解压完整文件夹</strong><span>把 zip 全部解压出来，建议放桌面或 D 盘。</span></div>
+          </div>
+          <div class="quick-item">
+            <span class="number">2</span>
+            <div><strong>双击启动</strong><span>打开 <code>start-oneclick.bat</code>，等待浏览器自动打开。</span></div>
+          </div>
+          <div class="quick-item">
+            <span class="number">3</span>
+            <div><strong>登录平台账号</strong><span>进入账号管理，逐个平台扫码或登录。</span></div>
+          </div>
+          <div class="quick-item">
+            <span class="number">4</span>
+            <div><strong>选择素材并发布</strong><span>在发布中心选择视频、平台、文案和封面。</span></div>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <div class="layout">
+      <aside class="toc">
+        <h2>目录</h2>
+        <nav>
+          <a href="#prepare">一、使用前准备</a>
+          <a href="#start">二、启动软件</a>
+          <a href="#login">三、登录账号</a>
+          <a href="#publish">四、发布视频</a>
+          <a href="#status">五、账号检测</a>
+          <a href="#trouble">六、常见问题</a>
+          <a href="#privacy">七、隐私安全</a>
+        </nav>
+      </aside>
+
+      <div class="content">
+        <section id="prepare" class="section">
+          <h2>一、使用前准备</h2>
+          <p>拿到整合包后，先确认它是一个 zip 压缩包，或者已经被解压成一个完整文件夹。</p>
+          <div class="steps">
+            <article class="step">
+              <span class="step-index">1</span>
+              <div>
+                <h3>先解压，不要直接在压缩包里运行</h3>
+                <p>右键 zip，选择“全部解压”或“解压到当前文件夹”。如果在压缩包里直接双击，软件可能找不到自带运行环境。</p>
+              </div>
+            </article>
+            <article class="step">
+              <span class="step-index">2</span>
+              <div>
+                <h3>建议放到简单路径</h3>
+                <p>外层文件夹可以改成中文名，比如“自媒体一键分发整合包”。推荐放到桌面、D 盘根目录或类似 <code>D:\auto-upload-oneclick</code> 的位置。路径太长或符号太复杂，可能影响部分平台上传文件。</p>
+              </div>
+            </article>
+            <article class="step">
+              <span class="step-index">3</span>
+              <div>
+                <h3>保留完整目录结构</h3>
+                <p>不要只复制一个启动文件，也不要改内部目录名。整合包里的 <code>runtime</code>、<code>frontend</code>、<code>uploader</code>、<code>myUtils</code>、<code>cookiesFile</code>、<code>db</code> 等文件夹都需要保留。</p>
+              </div>
+            </article>
+          </div>
+          <div class="callout warning">
+            <strong>重要：</strong>如果电脑提示“Windows 已保护你的电脑”或杀毒软件询问是否允许运行，请确认文件来自可信来源后选择允许。本工具会启动一个本地服务，只在你自己的电脑上打开 <code>127.0.0.1:5409</code>。
+          </div>
+        </section>
+
+        <section id="start" class="section">
+          <h2>二、启动软件</h2>
+          <p>进入解压后的文件夹，找到 <code>start-oneclick.bat</code>，双击它。</p>
+          <div class="steps">
+            <article class="step">
+              <span class="step-index">1</span>
+              <div>
+                <h3>双击 <code>start-oneclick.bat</code></h3>
+                <p>启动后会出现一个黑色窗口，这是软件后台服务窗口。使用过程中不要关闭它。</p>
+              </div>
+            </article>
+            <article class="step">
+              <span class="step-index">2</span>
+              <div>
+                <h3>等待浏览器自动打开</h3>
+                <p>正常情况下，几秒后浏览器会自动打开 <code>http://127.0.0.1:5409/</code>。如果没有自动打开，可以手动复制这个地址到浏览器。</p>
+              </div>
+            </article>
+            <article class="step">
+              <span class="step-index">3</span>
+              <div>
+                <h3>保持启动窗口打开</h3>
+                <p>关闭启动窗口就相当于关闭软件后台。发布任务执行时，请保持这个窗口和浏览器页面都打开。</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="login" class="section">
+          <h2>三、登录账号</h2>
+          <p>第一次使用时，需要先进入“账号管理”，把要发布的平台账号登录好。</p>
+          <div class="grid-two">
+            <div class="mini-card">
+              <h3>登录方式</h3>
+              <p>不同平台可能是扫码登录、手机号登录或后台自动打开。按平台页面提示完成即可。</p>
+            </div>
+            <div class="mini-card">
+              <h3>账号信息刷新</h3>
+              <p>登录完成后，软件会尝试刷新账号名称和头像，方便你确认当前登录的是哪个账号。</p>
+            </div>
+          </div>
+          <ul class="checklist">
+            <li><span class="check">✓</span><span>如果页面要求扫码，就用对应平台 App 扫码确认。</span></li>
+            <li><span class="check">✓</span><span>如果平台提示登录过期，重新登录一次即可。</span></li>
+            <li><span class="check">✓</span><span>如果账号头像或名称没有立刻出现，可以在账号管理里重新验证。</span></li>
+          </ul>
+        </section>
+
+        <section id="publish" class="section">
+          <h2>四、发布视频</h2>
+          <p>账号登录完成后，进入“发布中心”准备发布内容。</p>
+          <div class="steps">
+            <article class="step">
+              <span class="step-index">1</span>
+              <div>
+                <h3>选择要发布的平台</h3>
+                <p>勾选抖音、快手、视频号、B 站、小红书等需要发布的平台。只勾选本次要发布的账号。</p>
+              </div>
+            </article>
+            <article class="step">
+              <span class="step-index">2</span>
+              <div>
+                <h3>上传视频和封面</h3>
+                <p>选择视频文件，并按平台要求补充封面。不同平台可能支持不同尺寸，按页面提示选择即可。</p>
+              </div>
+            </article>
+            <article class="step">
+              <span class="step-index">3</span>
+              <div>
+                <h3>填写标题、文案和话题</h3>
+                <p>根据内容填写作品文案、标题、简介、话题等信息。平台有字数限制时，页面会显示提示。</p>
+              </div>
+            </article>
+            <article class="step">
+              <span class="step-index">4</span>
+              <div>
+                <h3>点击发布</h3>
+                <p>点击发布后，如果弹出账号检测提示，建议选择“先检测并发布”。检测通过后，软件会进入自动发布流程。</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="status" class="section">
+          <h2>五、账号检测怎么理解</h2>
+          <p>部分平台登录态会过期，尤其是视频号这类平台，可能一天左右就需要重新扫码。发布前检测可以提前发现问题。</p>
+          <div class="callout success">
+            <strong>建议选择检测：</strong>如果所有平台检测通过，再进入发布流程。这样能减少发布到一半才发现某个平台需要重新登录的情况。
+          </div>
+          <div class="callout warning">
+            <strong>如果检测失败：</strong>不要急着继续发布。先回到账号管理，把失败的平台重新登录或重新验证，再回到发布中心重新发布。
+          </div>
+          <div class="grid-two">
+            <div class="mini-card">
+              <h3>检测通过但仍弹扫码</h3>
+              <p>可能是平台 Cookie、浏览器状态或平台风控临时刷新导致。先重新登录该平台，再重新发布。</p>
+            </div>
+            <div class="mini-card">
+              <h3>只想快速测试</h3>
+              <p>可以跳过检测直接发布，但正式发布前更建议检测，尤其是多平台同时分发时。</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="trouble" class="section">
+          <h2>六、常见问题</h2>
+          <div class="steps">
+            <article class="step">
+              <span class="step-index">问</span>
+              <div>
+                <h3>双击后页面没有打开怎么办？</h3>
+                <p>先等 10 秒。如果还没有打开，手动在浏览器输入 <code>http://127.0.0.1:5409/</code>。仍不行就关闭启动窗口，重新双击。</p>
+              </div>
+            </article>
+            <article class="step">
+              <span class="step-index">问</span>
+              <div>
+                <h3>提示端口被占用怎么办？</h3>
+                <p>启动脚本会自动清理旧服务。如果仍失败，重启电脑后再打开整合包。</p>
+              </div>
+            </article>
+            <article class="step">
+              <span class="step-index">问</span>
+              <div>
+                <h3>某个平台发布失败怎么办？</h3>
+                <p>先看页面底部的失败提示。常见原因是账号登录过期、平台页面弹窗、素材格式不符合平台要求、标题或话题不符合规则。</p>
+              </div>
+            </article>
+            <article class="step">
+              <span class="step-index">问</span>
+              <div>
+                <h3>快手出现引导弹窗怎么办？</h3>
+                <p>软件会尽量自动处理平台引导。如果平台改版导致挡住发布，先手动完成一次引导，再重新发布。</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="privacy" class="section">
+          <h2>七、隐私和分发注意事项</h2>
+          <p>整合包本身不需要你的账号密码，但平台登录态、上传素材和发布记录会保存在本机目录里。</p>
+          <ul class="checklist">
+            <li><span class="check">✓</span><span><code>cookiesFile</code> 保存平台登录态，不要发给别人。</span></li>
+            <li><span class="check">✓</span><span><code>videoFile</code> 可能保存你上传过的视频素材，不要带着一起外传。</span></li>
+            <li><span class="check">✓</span><span><code>db</code> 可能保存发布记录，不要发给别人。</span></li>
+            <li><span class="check">✓</span><span><code>logs</code> 可能包含错误信息和页面状态，排查问题时可以单独发给技术人员。</span></li>
+          </ul>
+          <div class="callout danger">
+            <strong>分发给新用户前：</strong>请确认 <code>cookiesFile</code>、<code>videoFile</code>、<code>db</code>、<code>logs</code>、<code>avatars</code> 这些目录是空的，避免把自己的账号状态或素材一起发出去。
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <footer class="footer">
+      这是一份面向新手的本地使用教程。平台规则和页面会变化，正式发布前建议先用测试素材小规模验证。
+    </footer>
+  </main>
+</body>
+</html>

@@ -186,7 +186,7 @@ class XiaoHongShuPublishButtonSelectorTest(unittest.TestCase):
 
         asyncio.run(run_case())
 
-    def test_scheduled_publish_still_selects_bottom_publish_button(self):
+    def test_scheduled_publish_selects_bottom_scheduled_publish_button(self):
         async def run_case():
             async with async_playwright() as playwright:
                 browser = await playwright.chromium.launch(headless=True)
@@ -223,7 +223,7 @@ class XiaoHongShuPublishButtonSelectorTest(unittest.TestCase):
                           </div>
                         </div>
                         <div class="action-bar">
-                          <button class="bottom-publish" data-test-id="bottom-publish"><span>发布</span></button>
+                          <button class="bottom-publish" data-test-id="bottom-publish"><span>定时发布</span></button>
                         </div>
                       </body>
                     </html>
@@ -248,6 +248,57 @@ class XiaoHongShuPublishButtonSelectorTest(unittest.TestCase):
                 )
                 await browser.close()
                 self.assertEqual(selected_test_id, "bottom-publish")
+
+        asyncio.run(run_case())
+
+    def test_scheduled_publish_selects_xhs_custom_element_submit_text(self):
+        async def run_case():
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                page = await browser.new_page(viewport={"width": 1600, "height": 913})
+                await page.set_content(
+                    """
+                    <!doctype html>
+                    <html>
+                      <head>
+                        <style>
+                          body { margin: 0; height: 913px; font-family: sans-serif; }
+                          .sidebar-publish {
+                            position: fixed; left: 24px; top: 80px; width: 176px; height: 44px;
+                            border-radius: 24px; background: rgb(255, 36, 66); color: white;
+                          }
+                          xhs-publish-btn {
+                            position: fixed; left: 410px; bottom: 0; width: 680px; height: 90px;
+                            display: block; z-index: 101;
+                          }
+                        </style>
+                      </head>
+                      <body>
+                        <div class="sidebar-publish">发布笔记</div>
+                        <xhs-publish-btn
+                          data-test-id="xhs-host"
+                          is-publish="true"
+                          is-save-draft="true"
+                          submit-text="定时发布"
+                          save-text="暂存离开"
+                          submit-disabled="false"
+                          save-disabled="false"></xhs-publish-btn>
+                      </body>
+                    </html>
+                    """
+                )
+
+                uploader = XiaoHongShuVideo(
+                    title="测试",
+                    file_path="dummy.mp4",
+                    tags=[],
+                    publish_date=datetime(2026, 5, 16, 10, 0),
+                    account_file="dummy.json",
+                )
+                locator = await uploader.wait_publish_button_ready(page)
+                selected_test_id = await locator.evaluate("node => node.getAttribute('data-test-id')")
+                await browser.close()
+                self.assertEqual(selected_test_id, "xhs-host")
 
         asyncio.run(run_case())
 
@@ -412,6 +463,48 @@ class XiaoHongShuPublishButtonSelectorTest(unittest.TestCase):
                 status_text = await page.locator("#status").inner_text()
                 await browser.close()
                 self.assertEqual(status_text, "上传成功")
+
+        asyncio.run(run_case())
+
+    def test_topic_accepts_platform_generated_valid_topic_node(self):
+        async def run_case():
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                page = await browser.new_page(viewport={"width": 1280, "height": 720})
+                await page.set_content(
+                    """
+                    <!doctype html>
+                    <html>
+                      <body>
+                        <div class="tiptap ProseMirror" contenteditable="true">标题内容</div>
+                        <script>
+                          const editor = document.querySelector('.tiptap.ProseMirror');
+                          editor.addEventListener('input', () => {
+                            if (editor.innerText.includes('#1') && !editor.querySelector('a.tiptap-topic')) {
+                              editor.innerHTML = '标题内容 <a class="tiptap-topic">#每一帧都是电影画质[话题]#</a>';
+                            }
+                          });
+                        </script>
+                      </body>
+                    </html>
+                    """
+                )
+
+                uploader = XiaoHongShuVideo(
+                    title="测试",
+                    file_path="dummy.mp4",
+                    tags=["#1"],
+                    publish_date=0,
+                    account_file="dummy.json",
+                )
+                await uploader.fill_topics(page)
+                editor_text = await page.locator(".tiptap.ProseMirror").inner_text()
+                topic_nodes = await page.locator(".tiptap.ProseMirror a.tiptap-topic").count()
+                topic_text = await page.locator(".tiptap.ProseMirror a.tiptap-topic").first.inner_text()
+                await browser.close()
+                self.assertIn("[话题]", editor_text)
+                self.assertEqual(topic_nodes, 1)
+                self.assertEqual(topic_text, "#每一帧都是电影画质[话题]#")
 
         asyncio.run(run_case())
 

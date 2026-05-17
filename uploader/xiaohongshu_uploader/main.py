@@ -18,6 +18,10 @@ from utils.log import xiaohongshu_logger, XIAOHONGSHU_SCREENSHOT_DIR
 from utils.publish_limits import normalize_publish_tags
 
 
+def normalize_xhs_topic_text(raw_text: str) -> str:
+    return "".join((raw_text or "").replace("\xa0", " ").split())
+
+
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -130,16 +134,25 @@ class XiaoHongShuVideo(object):
         if not await wrapper.locator(".d-switch-simulator.checked, input[type='checkbox']:checked").count():
             raise RuntimeError("小红书定时发布开关未保持开启")
 
+        await page.keyboard.press("Escape")
+        try:
+            await date_input.evaluate("node => node.blur()")
+        except Exception:
+            pass
+        await page.wait_for_timeout(500)
         xiaohongshu_logger.info(f"小红书定时发布时间已确认: {actual_time}")
+
+    def get_publish_button_text(self):
+        return "定时发布" if self.publish_date != 0 else "发布"
 
     async def handle_upload_error(self, page):
         xiaohongshu_logger.info('视频出错了，重新上传中')
         await page.locator('div.progress-div [class^="upload-btn-input"]').set_input_files(self.file_path)
 
     async def wait_publish_button_ready(self, page: Page):
-        # 小红书定时发布也是先打开定时开关、写入时间，底部最终提交按钮仍然叫“发布”。
-        button_text = "发布"
-        xiaohongshu_logger.info("小红书开始定位底部发布按钮")
+        # 定时发布时新版页面底部主按钮会显示“定时发布”，不能继续只找“发布”。
+        button_text = self.get_publish_button_text()
+        xiaohongshu_logger.info(f"小红书开始定位底部{button_text}按钮")
         scroll_info = await self.scroll_publish_action_area_into_view(page, button_text)
         xiaohongshu_logger.info(f"小红书已尝试滚动到底部发布操作区: {scroll_info}")
         marked_button = page.locator('[data-sau-xhs-publish-button="1"]').first
@@ -732,7 +745,7 @@ class XiaoHongShuVideo(object):
                     const centerX = rect.left + rect.width / 2;
                     const xhsPublishHost =
                       el.tagName === 'XHS-PUBLISH-BTN' &&
-                      normalize(el.getAttribute('submit-text')) === '发布' &&
+                      ['发布', '定时发布'].includes(normalize(el.getAttribute('submit-text'))) &&
                       el.getAttribute('submit-disabled') !== 'true' &&
                       rect.width >= 240 &&
                       rect.height >= 60 &&
@@ -740,7 +753,7 @@ class XiaoHongShuVideo(object):
                       centerX > window.innerWidth * 0.25 &&
                       centerX < window.innerWidth * 0.75;
                     const bottomPublishArea =
-                      text === '发布' &&
+                      ['发布', '定时发布'].includes(text) &&
                       rect.width >= 70 &&
                       rect.height >= 32 &&
                       rect.top > window.innerHeight * 0.50 &&
@@ -845,10 +858,11 @@ class XiaoHongShuVideo(object):
             await page.wait_for_timeout(1000)
 
     async def click_publish_until_accepted(self, page: Page):
+        button_text = self.get_publish_button_text()
         for attempt in range(1, 4):
             publish_button = await self.wait_publish_button_ready(page)
             trigger_method = await self.trigger_publish_button(publish_button)
-            xiaohongshu_logger.info(f"小红书发布按钮已触发，第{attempt}次，方式={trigger_method}")
+            xiaohongshu_logger.info(f"小红书{button_text}按钮已触发，第{attempt}次，方式={trigger_method}")
             await self.confirm_publish_dialog_if_needed(page)
 
             try:
@@ -871,7 +885,7 @@ class XiaoHongShuVideo(object):
                 return True
 
             button_info = await self.read_publish_button_info(page.locator('[data-sau-xhs-publish-button="1"]').first)
-            xiaohongshu_logger.warning(f"小红书发布点击后5秒未进入发布流程，准备重试，按钮状态={button_info}")
+            xiaohongshu_logger.warning(f"小红书{button_text}点击后5秒未进入发布流程，准备重试，按钮状态={button_info}")
 
         return False
 
@@ -1304,7 +1318,7 @@ class XiaoHongShuVideo(object):
             texts = []
             for index in range(await nodes.count()):
                 raw_text = await nodes.nth(index).inner_text()
-                texts.append("".join(raw_text.replace("\xa0", " ").split()))
+                texts.append(normalize_xhs_topic_text(raw_text))
             return texts
 
         async def click_exact_topic_candidate(tag_name: str) -> bool:
@@ -1324,8 +1338,10 @@ class XiaoHongShuVideo(object):
                     continue
             return False
 
-        # 小红书需要尽量模拟人工键盘节奏：先用键盘组合输入 "#"，等待编辑器进入话题模式，
-        # 再逐字输入标签并按空格确认。普通文本 "#话题" 不算成功。
+        accepted_topic_nodes = []
+
+        # 小红书话题必须进入官方节点状态，普通 "#话题" 文本没有话题意义。
+        # 优先点击精确候选；如果平台没有精确候选但生成了官方话题节点，也接受这个节点继续发布。
         for topic in topic_parts:
             tag_name = topic.lstrip("#")
             expected_node_text = f"#{tag_name}[话题]#"
@@ -1348,6 +1364,14 @@ class XiaoHongShuVideo(object):
                 after_nodes = await get_topic_node_texts()
                 new_nodes = after_nodes[len(before_nodes):]
                 if new_nodes and new_nodes[-1] == expected_node_text:
+                    accepted_topic_nodes.append(new_nodes[-1])
+                    accepted = True
+                    break
+                if new_nodes:
+                    accepted_topic_nodes.append(new_nodes[-1])
+                    xiaohongshu_logger.warning(
+                        f"小红书话题 {topic} 未匹配到精确官方候选，已接受页面生成的有效话题节点: {new_nodes[-1]}"
+                    )
                     accepted = True
                     break
 
@@ -1362,31 +1386,18 @@ class XiaoHongShuVideo(object):
                 editor_text = (await editor.inner_text()).replace("\xa0", " ").strip()
                 topic_nodes = await get_topic_node_texts()
                 raise RuntimeError(
-                    f"小红书话题节点生成失败，缺失：{topic}，当前内容：{editor_text[:120]}，节点={topic_nodes}"
+                    f"小红书话题节点生成失败，缺失有效话题节点：{topic}，当前内容：{editor_text[:120]}，节点={topic_nodes}"
                 )
 
         editor_text = (await editor.inner_text()).replace("\xa0", " ").strip()
         topic_nodes = await get_topic_node_texts()
-        expected_node_texts = {
-            f"#{str(tag).strip().lstrip('#')}[话题]#"
-            for tag in self.tags
-            if str(tag).strip().lstrip("#")
-        }
-        wrong_nodes = [
-            node for node in topic_nodes
-            if node not in expected_node_texts
-        ]
-        missing = [
-            tag for tag in self.tags
-            if f"#{str(tag).strip().lstrip('#')}" not in editor_text
-        ]
 
-        if wrong_nodes or missing:
+        if len(topic_nodes) < len(topic_parts):
             raise RuntimeError(
-                f"小红书话题节点写入校验失败，错误节点={wrong_nodes}，缺失={missing}，当前内容={editor_text[:120]}，节点={topic_nodes}"
+                f"小红书话题节点写入校验失败，期望节点数={len(topic_parts)}，实际节点={topic_nodes}，当前内容={editor_text[:120]}"
             )
 
-        xiaohongshu_logger.info(f"小红书话题已按原文生成节点: {' '.join(topic_parts)}")
+        xiaohongshu_logger.info(f"小红书话题已生成有效节点: {topic_nodes}")
 
     async def set_location(self, page: Page, location: str = "青岛市"):
         print(f"开始设置位置: {location}")

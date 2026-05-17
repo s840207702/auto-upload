@@ -27,3 +27,5 @@ uploader/**/*token*.json
 !/_codex/CURRENT_TASK.md
 !/_codex/PROJECT_MAP.md
 !/_codex/DECISIONS.md
+/release/
+/测试文件/

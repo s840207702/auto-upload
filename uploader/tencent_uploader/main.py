@@ -106,6 +106,7 @@ class TencentVideo(object):
     async def set_schedule_time_tencent(self, page, publish_date):
         label_element = page.locator("label").filter(has_text="定时").nth(1)
         await label_element.click()
+        await page.wait_for_timeout(500)
 
         await page.click('input[placeholder="请选择发表时间"]')
 
@@ -131,13 +132,17 @@ class TencentVideo(object):
                 break
 
         # 输入完整时间，不能只写小时，否则随机分钟会被平台重置到整点。
-        await page.click('input[placeholder="请选择时间"]')
+        time_input = page.locator('input[placeholder="请选择时间"]').first
+        await time_input.click()
         await page.keyboard.press("Control+KeyA")
-        await page.keyboard.type(publish_date.strftime("%H:%M"))
+        await time_input.fill(publish_date.strftime("%H:%M"))
         await page.keyboard.press("Enter")
+        await page.wait_for_timeout(500)
 
         # 选择标题栏（令定时时间生效）
         await page.locator("div.input-editor").click()
+        await page.keyboard.press("Escape")
+        tencent_logger.info(f"视频号定时发布时间已设置：{publish_date.strftime('%Y-%m-%d %H:%M')}")
 
     async def handle_upload_error(self, page):
         tencent_logger.info("视频出错了，重新上传中")
